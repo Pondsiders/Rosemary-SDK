@@ -5,6 +5,7 @@ description = "Everything that turns Claude into Alpha"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30.0",
+    "claude-agent-sdk>=0.1.0",
     "httpx>=0.28.0",
     "logfire>=3.0.0",
     "pendulum>=3.0.0",

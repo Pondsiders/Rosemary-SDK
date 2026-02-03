@@ -69,27 +69,82 @@ alpha_sdk/
 
 ## The Client API
 
+AlphaClient is a **long-lived** wrapper around the Claude Agent SDK. The SDK has a ~4 second startup cost, so we keep one client alive and reuse it across conversations.
+
+### Basic Usage
+
 ```python
 from alpha_sdk import AlphaClient
 
-async with AlphaClient(
-    session_id=session_id,      # None for new, string to resume
-    fork_from=other_session_id, # Optional: fork instead of resume
+# Create once at application startup
+client = AlphaClient(
+    cwd="/Pondside",
     allowed_tools=[...],
     mcp_servers={...},
-    archive=True,               # Whether to archive turns to Postgres
-) as client:
+)
+await client.connect()
 
-    await client.query(prompt)
+# Use for multiple conversations
+await client.query(prompt, session_id="abc123")  # Resume existing
+async for event in client.stream():
+    yield event
 
+await client.query(other_prompt, session_id="xyz789")  # Different session
+async for event in client.stream():
+    yield event
+
+await client.query(new_prompt)  # New session (no session_id)
+async for event in client.stream():
+    yield event
+print(client.session_id)  # Capture the new session ID
+
+# Cleanup when done
+await client.disconnect()
+```
+
+### Session Discovery
+
+Sessions are stored as JSONL files by the SDK. AlphaClient encapsulates this:
+
+```python
+# List available sessions
+sessions = await AlphaClient.list_sessions(cwd="/Pondside")
+# Returns: [
+#     {"id": "30bb8d6f...", "created": "2026-02-03T...",
+#      "last_activity": "2026-02-03T...", "preview": "Hello, little duck..."},
+#     ...
+# ]
+
+# Get path for a specific session (if you need it)
+path = AlphaClient.get_session_path("30bb8d6f...", cwd="/Pondside")
+# Returns: ~/.claude/projects/-Pondside/30bb8d6f....jsonl
+```
+
+Consumers don't need to know about JSONL files or path formatting.
+
+### Context Manager (for one-shot use)
+
+```python
+async with AlphaClient(cwd="/Pondside") as client:
+    await client.query(prompt, session_id=session_id)
     async for event in client.stream():
-        # StreamEvent, ToolCall, ToolResult, etc.
         yield event
-
-    # client.session_id available after streaming
 ```
 
 ## How It Works
+
+### Long-Lived Client & Session Switching
+
+The SDK client is expensive to create (~4 seconds). AlphaClient handles this by:
+
+1. Creating the SDK client once at `connect()`
+2. Tracking the current session ID
+3. When `query(session_id=X)` is called:
+   - If X matches current session → reuse client
+   - If X differs → recreate SDK client with new `resume` option
+   - If X is None → recreate for new session, capture resulting ID
+
+This means Duckpond can be a dumb pass-through: whatever session_id the frontend sends, AlphaClient figures out whether to reuse or recreate.
 
 ### The Proxy Pattern
 
@@ -209,6 +264,28 @@ Steps 1-5 can happen without touching Duckpond. Steps 6-7 are the switchover. St
 - **Cortex as library vs service?** Currently HTTP. Could become a library too (just Postgres operations). Decided: separate package, dependency of `alpha_sdk`.
 - **OLMo location?** Currently on Primer. Stays there for now (GPU).
 
+## Session Storage
+
+The SDK stores sessions as append-only JSONL files:
+
+```
+~/.claude/projects/{formatted_cwd}/{session_id}.jsonl
+```
+
+Where `formatted_cwd` is the realpath with `/` replaced by `-`. For example:
+- cwd `/Pondside` → formatted `-Pondside`
+- cwd `/home/alpha/projects/foo` → formatted `-home-alpha-projects-foo`
+
+Each line is a JSON object with:
+- `type`: "user", "assistant", "system", "queue-operation"
+- `sessionId`: the UUID
+- `timestamp`: ISO timestamp
+- `message`: the actual content
+- `uuid`: unique ID for this message
+- `parentUuid`: links to previous message
+
+AlphaClient's `list_sessions()` and `get_session_path()` encapsulate all of this.
+
 ## Status
 
-**Planning complete. Ready to build.**
+**Building. SDK integration in progress.**
