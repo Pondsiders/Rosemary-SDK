@@ -96,6 +96,7 @@ class AlphaClient:
         self._current_session_id: str | None = None
         self._last_user_content: str = ""
         self._last_assistant_content: str = ""
+        self._turn_span: logfire.LogfireSpan | None = None
 
     # -------------------------------------------------------------------------
     # Session Discovery (static methods)
@@ -208,12 +209,16 @@ class AlphaClient:
             session_id: Session to resume, or None for new session
             fork_from: Session to fork from (creates new session with context)
         """
-        with logfire.span(
-            "alpha.query",
+        # Start the root turn span (will be ended in stream())
+        self._turn_span = logfire.span(
+            "alpha.turn",
             session_id=session_id or "new",
             fork_from=fork_from,
             client_name=self.client_name,
-        ) as span:
+        )
+        self._turn_span.__enter__()
+
+        with logfire.span("alpha.query") as span:
             # Handle session switching
             await self._ensure_session(session_id, fork_from)
 
@@ -222,12 +227,14 @@ class AlphaClient:
                 self._last_user_content = prompt
                 span.set_attribute("prompt_length", len(prompt))
                 span.set_attribute("prompt_preview", prompt[:200])
+                self._turn_span.set_attribute("prompt_preview", prompt[:100])
 
                 # Recall memories based on the prompt
                 if self._current_session_id:
                     memories = await recall(prompt, self._current_session_id)
                     if memories:
                         span.set_attribute("memories_recalled", len(memories))
+                        self._turn_span.set_attribute("memories_recalled", len(memories))
                         logger.info(f"Recalled {len(memories)} memories")
 
             # Send to SDK
@@ -245,36 +252,53 @@ class AlphaClient:
         if not self._sdk_client:
             raise RuntimeError("Client not connected. Call connect() first.")
 
-        with logfire.span("alpha.stream", session_id=self._current_session_id or "unknown") as span:
-            assistant_text_parts: list[str] = []
-            message_count = 0
+        try:
+            with logfire.span("alpha.stream") as span:
+                assistant_text_parts: list[str] = []
+                message_count = 0
 
-            async for message in self._sdk_client.receive_response():
-                message_count += 1
+                async for message in self._sdk_client.receive_response():
+                    message_count += 1
 
-                # Accumulate assistant text for memory extraction
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            assistant_text_parts.append(block.text)
+                    # Accumulate assistant text for memory extraction
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                assistant_text_parts.append(block.text)
 
-                # Capture session ID and stats from result
-                if isinstance(message, ResultMessage):
-                    self._current_session_id = message.session_id
-                    span.set_attribute("final_session_id", message.session_id)
-                    span.set_attribute("duration_ms", message.duration_ms)
-                    span.set_attribute("num_turns", message.num_turns)
-                    if message.total_cost_usd:
-                        span.set_attribute("cost_usd", message.total_cost_usd)
-                    if message.usage:
-                        span.set_attribute("usage", str(message.usage))
+                    # Capture session ID and stats from result
+                    if isinstance(message, ResultMessage):
+                        self._current_session_id = message.session_id
+                        span.set_attribute("final_session_id", message.session_id)
+                        span.set_attribute("duration_ms", message.duration_ms)
+                        span.set_attribute("num_turns", message.num_turns)
+                        if message.total_cost_usd:
+                            span.set_attribute("cost_usd", message.total_cost_usd)
+                        if message.usage:
+                            span.set_attribute("usage", str(message.usage))
 
-                yield message
+                        # Also set on root turn span
+                        if self._turn_span:
+                            self._turn_span.set_attribute("session_id", message.session_id)
+                            self._turn_span.set_attribute("duration_ms", message.duration_ms)
+                            self._turn_span.set_attribute("num_turns", message.num_turns)
+                            if message.total_cost_usd:
+                                self._turn_span.set_attribute("cost_usd", message.total_cost_usd)
 
-            # Store accumulated text for memorables extraction
-            self._last_assistant_content = "".join(assistant_text_parts)
-            span.set_attribute("message_count", message_count)
-            span.set_attribute("response_length", len(self._last_assistant_content))
+                    yield message
+
+                # Store accumulated text for memorables extraction
+                self._last_assistant_content = "".join(assistant_text_parts)
+                span.set_attribute("message_count", message_count)
+                span.set_attribute("response_length", len(self._last_assistant_content))
+
+                if self._turn_span:
+                    self._turn_span.set_attribute("response_length", len(self._last_assistant_content))
+        finally:
+            # End the root turn span
+            if self._turn_span:
+                self._turn_span.__exit__(None, None, None)
+                self._turn_span = None
 
     # -------------------------------------------------------------------------
     # Properties
