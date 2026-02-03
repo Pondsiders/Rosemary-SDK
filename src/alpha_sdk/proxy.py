@@ -1,30 +1,45 @@
-"""Minimal proxy server for request interception.
+"""Async proxy server for request interception.
 
-Runs a lightweight HTTP server that:
-1. Receives requests from Claude Agent SDK
+Runs an aiohttp server in the same event loop as the SDK client:
+1. Receives requests from Claude Agent SDK (via Claude Code subprocess)
 2. Transforms them via weave()
 3. Forwards to Anthropic
 4. Streams responses back
 
-This allows us to modify requests after the SDK builds them
-but before they reach Anthropic.
+Because it's async in the same event loop, all spans share trace context.
+One turn → one span → everything nested inside.
 """
 
 import asyncio
-import json
 import logging
-import os
 import socket
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
-from typing import Callable, Any
-from urllib.parse import urlparse
+from typing import Any, Callable, Awaitable
 
 import httpx
+import logfire
+from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
+
+# Headers to forward from incoming request (SDK → Anthropic)
+# These handle authentication - DO NOT add our own API keys!
+FORWARD_HEADERS = [
+    "authorization",      # OAuth Bearer token (Claude Max)
+    "x-api-key",          # API key auth (fallback)
+    "anthropic-version",
+    "anthropic-beta",
+    "content-type",
+]
+
+# Headers to skip when forwarding response (hop-by-hop)
+SKIP_RESPONSE_HEADERS = {
+    "content-encoding",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+}
 
 
 def _find_free_port() -> int:
@@ -34,163 +49,180 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-class ProxyHandler(BaseHTTPRequestHandler):
-    """HTTP handler that intercepts and transforms requests."""
-
-    weaver: Callable[[dict], Any] | None = None
-    client_name: str | None = None
-    hostname: str | None = None
-
-    # Headers to forward from incoming request (SDK → Anthropic)
-    # These handle authentication - DO NOT add our own API keys!
-    FORWARD_HEADERS = [
-        "authorization",      # OAuth Bearer token (Claude Max)
-        "x-api-key",          # API key auth (fallback)
-        "anthropic-version",
-        "anthropic-beta",
-        "content-type",
-    ]
-
-    def log_message(self, format, *args):
-        """Suppress default logging."""
-        pass
-
-    def do_POST(self):
-        """Handle POST requests (the messages endpoint)."""
-        try:
-            # Read request body
-            content_length = int(self.headers.get("Content-Length", 0))
-            body_bytes = self.rfile.read(content_length)
-            body = json.loads(body_bytes)
-
-            # Transform via weave
-            if self.weaver:
-                # Run async weave in sync context
-                loop = asyncio.new_event_loop()
-                try:
-                    body = loop.run_until_complete(
-                        self.weaver(body, self.client_name, self.hostname)
-                    )
-                finally:
-                    loop.close()
-
-            # Forward headers from SDK - let SDK handle auth!
-            # DO NOT inject our own API keys
-            headers = {}
-            for header_name in self.FORWARD_HEADERS:
-                value = self.headers.get(header_name)
-                if value:
-                    headers[header_name] = value
-
-            # Ensure we have content-type
-            if "content-type" not in headers:
-                headers["content-type"] = "application/json"
-
-            # Forward to Anthropic with STREAMING
-            # Use stream() to avoid buffering the entire response
-            with httpx.Client(timeout=300.0) as client:
-                with client.stream(
-                    "POST",
-                    f"{ANTHROPIC_API_URL}{self.path}",
-                    json=body,
-                    headers=headers,
-                ) as response:
-                    # Send response status and headers immediately
-                    self.send_response(response.status_code)
-                    for key, value in response.headers.items():
-                        # Skip hop-by-hop headers
-                        if key.lower() not in (
-                            "content-encoding",
-                            "transfer-encoding",
-                            "connection",
-                            "keep-alive",
-                        ):
-                            self.send_header(key, value)
-                    self.end_headers()
-
-                    # Stream response body chunk by chunk
-                    for chunk in response.iter_bytes():
-                        self.wfile.write(chunk)
-                        self.wfile.flush()  # Critical for real-time streaming!
-
-        except BrokenPipeError:
-            # Client disconnected mid-stream (normal for count_tokens, etc.)
-            pass
-        except Exception as e:
-            logger.error(f"Proxy error: {e}")
-            try:
-                self.send_error(500, str(e))
-            except BrokenPipeError:
-                pass  # Client already gone
-
-    def do_GET(self):
-        """Handle GET requests (health check, etc.)."""
-        if self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
-            self.send_error(404)
-
-
 class AlphaProxy:
-    """Minimal proxy server for intercepting SDK requests."""
+    """Async proxy server for intercepting SDK requests.
+
+    Runs in the same event loop as the caller, enabling shared trace context.
+
+    Usage:
+        proxy = AlphaProxy(weaver=weave, client="duckpond")
+        await proxy.start()
+
+        os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
+        # ... use SDK ...
+
+        await proxy.stop()
+    """
 
     def __init__(
         self,
-        weaver: Callable[[dict, str | None, str | None], Any],
+        weaver: Callable[[dict, str | None, str | None], Awaitable[dict]],
         client: str | None = None,
         hostname: str | None = None,
     ):
+        """Initialize the proxy.
+
+        Args:
+            weaver: Async function to transform request bodies
+            client: Client name (for logging, passed to weaver)
+            hostname: Machine hostname (passed to weaver)
+        """
         self.weaver = weaver
         self.client = client
         self.hostname = hostname
-        self.server: HTTPServer | None = None
-        self.thread: Thread | None = None
-        self.port: int | None = None
 
-    def start(self) -> int:
+        self._port: int | None = None
+        self._app: web.Application | None = None
+        self._runner: web.AppRunner | None = None
+        self._site: web.TCPSite | None = None
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def start(self) -> int:
         """Start the proxy server.
 
         Returns:
             The port number the server is listening on.
         """
-        self.port = _find_free_port()
+        self._port = _find_free_port()
 
-        # Create handler class with our settings
-        handler = type(
-            "ConfiguredProxyHandler",
-            (ProxyHandler,),
-            {
-                "weaver": staticmethod(self.weaver),
-                "client_name": self.client,
-                "hostname": self.hostname,
-            },
-        )
+        # Create long-lived httpx client for forwarding requests
+        self._http_client = httpx.AsyncClient(timeout=300.0)
 
-        self.server = HTTPServer(("127.0.0.1", self.port), handler)
+        # Build aiohttp app
+        self._app = web.Application()
+        self._app.router.add_route("*", "/{path:.*}", self._handle_request)
 
-        # Run in background thread
-        self.thread = Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        # Start server
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, "127.0.0.1", self._port)
+        await self._site.start()
 
-        logger.info(f"Alpha proxy started on port {self.port}")
-        return self.port
+        logger.info(f"Alpha proxy started on port {self._port}")
+        return self._port
 
-    def stop(self):
+    async def stop(self) -> None:
         """Stop the proxy server."""
-        if self.server:
-            self.server.shutdown()
-            self.server = None
-        if self.thread:
-            self.thread.join(timeout=1.0)
-            self.thread = None
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
+
+        if self._runner:
+            await self._runner.cleanup()
+            self._runner = None
+
+        self._site = None
+        self._app = None
+
         logger.info("Alpha proxy stopped")
 
     @property
     def base_url(self) -> str:
         """Get the base URL for this proxy."""
-        if self.port is None:
+        if self._port is None:
             raise RuntimeError("Proxy not started")
-        return f"http://127.0.0.1:{self.port}"
+        return f"http://127.0.0.1:{self._port}"
+
+    @property
+    def port(self) -> int | None:
+        """Get the port number."""
+        return self._port
+
+    async def _handle_request(self, request: web.Request) -> web.StreamResponse:
+        """Handle incoming requests from the SDK."""
+        path = "/" + request.match_info.get("path", "")
+
+        # Health check
+        if request.method == "GET" and path == "/health":
+            return web.Response(text="ok")
+
+        # Only handle POST to messages endpoints
+        if request.method != "POST":
+            return web.Response(status=404, text="Not found")
+
+        with logfire.span(
+            "proxy.forward",
+            path=path,
+            method=request.method,
+        ) as span:
+            try:
+                return await self._forward_request(request, path, span)
+            except Exception as e:
+                logger.error(f"Proxy error: {e}")
+                span.set_attribute("error", str(e))
+                return web.Response(status=500, text=str(e))
+
+    async def _forward_request(
+        self,
+        request: web.Request,
+        path: str,
+        span: logfire.LogfireSpan,
+    ) -> web.StreamResponse:
+        """Transform and forward a request to Anthropic."""
+        # Read request body
+        body_bytes = await request.read()
+
+        try:
+            body = await request.json()
+        except Exception:
+            # Not JSON - forward as-is (shouldn't happen for messages API)
+            body = None
+
+        # Transform via weave (if it's JSON and we have a weaver)
+        if body is not None and self.weaver:
+            body = await self.weaver(body, self.client, self.hostname)
+            span.set_attribute("transformed", True)
+
+        # Build headers - forward auth headers from SDK
+        headers = {}
+        for header_name in FORWARD_HEADERS:
+            value = request.headers.get(header_name)
+            if value:
+                headers[header_name] = value
+
+        # Ensure content-type
+        if "content-type" not in headers:
+            headers["content-type"] = "application/json"
+
+        # Forward to Anthropic
+        url = f"{ANTHROPIC_API_URL}{path}"
+
+        if self._http_client is None:
+            raise RuntimeError("HTTP client not initialized")
+
+        # Use streaming to forward response in real-time
+        async with self._http_client.stream(
+            "POST",
+            url,
+            json=body if body is not None else None,
+            content=body_bytes if body is None else None,
+            headers=headers,
+        ) as response:
+            span.set_attribute("status_code", response.status_code)
+
+            # Create streaming response
+            resp = web.StreamResponse(status=response.status_code)
+
+            # Forward response headers
+            for key, value in response.headers.items():
+                if key.lower() not in SKIP_RESPONSE_HEADERS:
+                    resp.headers[key] = value
+
+            await resp.prepare(request)
+
+            # Stream response body
+            async for chunk in response.aiter_bytes():
+                await resp.write(chunk)
+
+            await resp.write_eof()
+            return resp

@@ -138,13 +138,13 @@ class AlphaClient:
         Args:
             session_id: Session to resume, or None for new session
         """
-        # Start the proxy
+        # Start the async proxy (same event loop, shared trace context)
         self._proxy = AlphaProxy(
             weaver=weave,
             client=self.client_name,
             hostname=self.hostname,
         )
-        port = self._proxy.start()
+        port = await self._proxy.start()
 
         # Set environment for SDK
         os.environ["ANTHROPIC_BASE_URL"] = self._proxy.base_url
@@ -173,7 +173,7 @@ class AlphaClient:
 
         # Stop proxy
         if self._proxy:
-            self._proxy.stop()
+            await self._proxy.stop()
             self._proxy = None
 
         # Restore environment
