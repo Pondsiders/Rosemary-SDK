@@ -76,7 +76,7 @@ def _format_memory(memory: dict) -> str:
 
     # Include score if present (helps with debugging/transparency)
     score_str = f", score {score:.2f}" if score else ""
-    return f"Memory #{mem_id} ({relative_time}{score_str}):\n{content}"
+    return f"## Memory #{mem_id} ({relative_time}{score_str})\n{content}"
 
 
 async def _get_pending_memorables(session_id: str) -> list[str] | None:
@@ -345,25 +345,100 @@ class AlphaClient:
     async def stream(self) -> AsyncGenerator[Any, None]:
         """Stream responses from the agent.
 
+        Progressive observability: gen_ai.* attributes update after each message,
+        so if the turn hangs you can see everything up to that point in Logfire.
+
         Yields:
             Message objects from the SDK
         """
         if not self._sdk_client:
             raise RuntimeError("Client not connected. Call connect() first.")
 
+        # Import SDK types we need for isinstance checks
+        from claude_agent_sdk.types import UserMessage, ToolUseBlock, ToolResultBlock
+
         try:
             with logfire.span("alpha.stream") as span:
                 assistant_text_parts: list[str] = []
                 message_count = 0
 
+                # Progressive accumulation for gen_ai.* attributes
+                # Input: user message + tool results
+                # Output: assistant text + tool calls
+                input_messages: list[dict] = []
+                output_messages: list[dict] = []
+
+                # Initialize with user message (our injected content)
+                user_parts = []
+                for block in self._last_content_blocks:
+                    if block.get("type") == "text":
+                        user_parts.append({
+                            "type": "text",
+                            "content": block.get("text", "")
+                        })
+                input_messages.append({"role": "user", "parts": user_parts})
+
+                # Set initial gen_ai attributes (system prompt + user message)
+                if self._turn_span:
+                    if self._system_prompt:
+                        self._turn_span.set_attribute(
+                            "gen_ai.system_instructions",
+                            json.dumps([{"type": "text", "content": self._system_prompt}])
+                        )
+                    self._turn_span.set_attribute("gen_ai.input.messages", json.dumps(input_messages))
+                    self._turn_span.set_attribute("gen_ai.output.messages", json.dumps(output_messages))
+                    self._turn_span.set_attribute("gen_ai.operation.name", "chat")
+                    self._turn_span.set_attribute("gen_ai.system", "anthropic")
+
                 async for message in self._sdk_client.receive_response():
                     message_count += 1
 
-                    # Accumulate assistant text for memory extraction
+                    # Handle assistant messages (text + tool calls)
                     if isinstance(message, AssistantMessage):
+                        assistant_parts = []
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 assistant_text_parts.append(block.text)
+                                assistant_parts.append({
+                                    "type": "text",
+                                    "content": block.text
+                                })
+                            elif isinstance(block, ToolUseBlock):
+                                assistant_parts.append({
+                                    "type": "tool_call",
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "input": block.input
+                                })
+                        if assistant_parts:
+                            output_messages.append({"role": "assistant", "parts": assistant_parts})
+                            # Update span progressively
+                            if self._turn_span:
+                                self._turn_span.set_attribute("gen_ai.output.messages", json.dumps(output_messages))
+
+                    # Handle user messages (tool results)
+                    elif isinstance(message, UserMessage):
+                        if isinstance(message.content, list):
+                            tool_result_parts = []
+                            for block in message.content:
+                                if isinstance(block, ToolResultBlock):
+                                    # Format tool result content
+                                    result_content = block.content
+                                    if isinstance(result_content, list):
+                                        result_content = json.dumps(result_content)
+                                    elif result_content is None:
+                                        result_content = ""
+                                    tool_result_parts.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": block.tool_use_id,
+                                        "content": str(result_content)[:500],  # Truncate for sanity
+                                        "is_error": block.is_error or False
+                                    })
+                            if tool_result_parts:
+                                input_messages.append({"role": "user", "parts": tool_result_parts})
+                                # Update span progressively
+                                if self._turn_span:
+                                    self._turn_span.set_attribute("gen_ai.input.messages", json.dumps(input_messages))
 
                     # Capture session ID and stats from result
                     if isinstance(message, ResultMessage):
@@ -375,7 +450,6 @@ class AlphaClient:
                             span.set_attribute("cost_usd", message.total_cost_usd)
                         if message.usage:
                             span.set_attribute("usage", str(message.usage))
-                            # Set gen_ai attributes on turn span
                             if self._turn_span:
                                 input_tokens = message.usage.get("input_tokens", 0)
                                 output_tokens = message.usage.get("output_tokens", 0)
@@ -399,37 +473,6 @@ class AlphaClient:
 
                 if self._turn_span:
                     self._turn_span.set_attribute("response_length", len(self._last_assistant_content))
-
-                    # Add gen_ai.* attributes for Logfire panel
-                    # Full input includes all content blocks (orientation, memories, user text)
-                    input_parts = []
-                    for block in self._last_content_blocks:
-                        if block.get("type") == "text":
-                            input_parts.append({
-                                "type": "text",
-                                "content": block.get("text", "")
-                            })
-                    input_msg = json.dumps([{
-                        "role": "user",
-                        "parts": input_parts
-                    }])
-
-                    output_msg = json.dumps([{
-                        "role": "assistant",
-                        "parts": [{"type": "text", "content": self._last_assistant_content}],
-                    }])
-
-                    # System instructions = just the soul
-                    if self._system_prompt:
-                        self._turn_span.set_attribute(
-                            "gen_ai.system_instructions",
-                            json.dumps([{"type": "text", "content": self._system_prompt}])
-                        )
-
-                    self._turn_span.set_attribute("gen_ai.input.messages", input_msg)
-                    self._turn_span.set_attribute("gen_ai.output.messages", output_msg)
-                    self._turn_span.set_attribute("gen_ai.operation.name", "chat")
-                    self._turn_span.set_attribute("gen_ai.system", "anthropic")
 
                 # Launch suggest as background task
                 if self._last_user_content and self._last_assistant_content:
