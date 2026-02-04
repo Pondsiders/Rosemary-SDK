@@ -121,7 +121,7 @@ async def _extract_queries(message: str) -> list[str]:
 
             if isinstance(queries, list):
                 valid = [q for q in queries if isinstance(q, str) and q.strip()]
-                logfire.info("Extracted queries", count=len(valid), queries=valid)
+                logfire.debug("Extracted queries", count=len(valid), queries=valid)
                 return valid
 
             return []
@@ -240,7 +240,7 @@ async def recall(prompt: str, session_id: str) -> list[dict[str, Any]]:
             new_ids = [m["id"] for m in all_memories]
             await _mark_seen(redis_client, session_id, new_ids)
 
-            logfire.info(
+            logfire.debug(
                 "Recall complete",
                 extracted=len(extracted_memories),
                 direct=len(direct_memories),

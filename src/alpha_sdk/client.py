@@ -6,9 +6,11 @@ Wraps Claude Agent SDK with:
 - Memory recall before prompts
 - Memorables extraction after turns
 - Session discovery and management
+- Transport bypass for structured input (canary + memories)
 """
 
 import asyncio
+import json
 import os
 from typing import Any, AsyncGenerator, AsyncIterable
 
@@ -24,10 +26,11 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import StreamEvent
 
 from .proxy import AlphaProxy
-from .weave import weave
 from .memories.recall import recall
 from .memories.suggest import suggest
 from .sessions import list_sessions, get_session_path, get_sessions_dir, SessionInfo
+from .envelope import build_envelope, build_user_message
+from .system_prompt import assemble
 
 
 class AlphaClient:
@@ -94,6 +97,8 @@ class AlphaClient:
         self._last_user_content: str = ""
         self._last_assistant_content: str = ""
         self._turn_span: logfire.LogfireSpan | None = None
+        self._suggest_task: asyncio.Task | None = None
+        self._system_prompt: list[dict] | None = None  # Assembled system prompt for current turn
 
     # -------------------------------------------------------------------------
     # Session Discovery (static methods)
@@ -136,11 +141,8 @@ class AlphaClient:
             session_id: Session to resume, or None for new session
         """
         # Start the async proxy (same event loop, shared trace context)
-        self._proxy = AlphaProxy(
-            weaver=weave,
-            client=self.client_name,
-            hostname=self.hostname,
-        )
+        # Pass self so proxy can access our state (system prompt, etc.)
+        self._proxy = AlphaProxy(alpha_client=self)
         port = await self._proxy.start()
 
         # Set environment for SDK
@@ -149,19 +151,17 @@ class AlphaClient:
         # Create SDK client
         await self._create_sdk_client(session_id)
 
-        logfire.info(f"AlphaClient connected (proxy on port {port})")
+        logfire.debug(f"AlphaClient connected (proxy on port {port})")
 
     async def disconnect(self) -> None:
         """Disconnect and clean up resources."""
-        # Fire-and-forget: extract memorables from last turn
-        if self._last_user_content and self._last_assistant_content:
-            asyncio.create_task(
-                suggest(
-                    self._last_user_content,
-                    self._last_assistant_content,
-                    self._current_session_id or "unknown",
-                )
-            )
+        # Wait for any pending suggest task to complete before teardown
+        if self._suggest_task is not None:
+            try:
+                await self._suggest_task
+            except Exception as e:
+                logfire.debug(f"Suggest task error on disconnect: {e}")
+            self._suggest_task = None
 
         # Disconnect SDK client
         if self._sdk_client:
@@ -178,7 +178,7 @@ class AlphaClient:
             del os.environ["ANTHROPIC_BASE_URL"]
 
         self._current_session_id = None
-        logfire.info("AlphaClient disconnected")
+        logfire.debug("AlphaClient disconnected")
 
     async def __aenter__(self) -> "AlphaClient":
         """Context manager entry - connects the client."""
@@ -195,14 +195,14 @@ class AlphaClient:
 
     async def query(
         self,
-        prompt: str | AsyncIterable[dict[str, Any]],
+        prompt: str | list[dict[str, Any]] | AsyncIterable[dict[str, Any]],
         session_id: str | None = None,
         fork_from: str | None = None,
     ) -> None:
         """Send a query to the agent.
 
         Args:
-            prompt: The user's message (string or async generator for streaming input)
+            prompt: The user's message - string, content blocks, or async generator
             session_id: Session to resume, or None for new session
             fork_from: Session to fork from (creates new session with context)
         """
@@ -223,26 +223,58 @@ class AlphaClient:
             # Handle session switching
             await self._ensure_session(session_id, fork_from)
 
-            # Store prompt for memory extraction
+            if not self._sdk_client:
+                raise RuntimeError("Client not connected. Call connect() first.")
+
+            # Handle async generator (streaming input) - pass through to SDK
+            if hasattr(prompt, "__aiter__"):
+                await self._sdk_client.query(prompt)
+                return
+
+            # For string or content blocks, build the envelope with canary
+            memories: list[dict] | None = None
+
+            # Extract text for memory operations
             if isinstance(prompt, str):
                 self._last_user_content = prompt
-                span.set_attribute("prompt_length", len(prompt))
-                span.set_attribute("prompt_preview", prompt[:200])
-                self._turn_span.set_attribute("prompt_preview", prompt[:100])
-
-                # Recall memories based on the prompt
-                if self._current_session_id:
-                    memories = await recall(prompt, self._current_session_id)
-                    if memories:
-                        span.set_attribute("memories_recalled", len(memories))
-                        self._turn_span.set_attribute("memories_recalled", len(memories))
-                        logfire.info(f"Recalled {len(memories)} memories")
-
-            # Send to SDK
-            if self._sdk_client:
-                await self._sdk_client.query(prompt)
+                prompt_text = prompt
             else:
-                raise RuntimeError("Client not connected. Call connect() first.")
+                # Content blocks - extract text for preview/memories
+                text_parts = [b.get("text", "") for b in prompt if b.get("type") == "text"]
+                prompt_text = " ".join(text_parts)
+                self._last_user_content = prompt_text
+
+            span.set_attribute("prompt_length", len(prompt_text))
+            span.set_attribute("prompt_preview", prompt_text[:200])
+            self._turn_span.set_attribute("prompt_preview", prompt_text[:100])
+
+            # Recall memories based on the prompt
+            memories = await recall(prompt_text, self._current_session_id or "new")
+            if memories:
+                span.set_attribute("memories_recalled", len(memories))
+                self._turn_span.set_attribute("memories_recalled", len(memories))
+                logfire.debug(f"Recalled {len(memories)} memories")
+
+            # Assemble system prompt now (proxy will grab it from self._system_prompt)
+            self._system_prompt = await assemble(
+                client=self.client_name,
+                hostname=self.hostname,
+            )
+            span.set_attribute("system_blocks", len(self._system_prompt))
+
+            # Build the envelope with canary
+            content_blocks = build_envelope(
+                prompt=prompt,
+                session_id=self._current_session_id,
+                client_name=self.client_name,
+                memories=memories,
+            )
+            span.set_attribute("content_blocks", len(content_blocks))
+
+            # Write directly to transport (bypass SDK's query() which only takes strings)
+            message = build_user_message(content_blocks, self._current_session_id)
+            await self._sdk_client._transport.write(json.dumps(message) + "\n")
+            logfire.debug(f"Sent message with {len(content_blocks)} content blocks")
 
     async def stream(self) -> AsyncGenerator[Any, None]:
         """Stream responses from the agent.
@@ -295,6 +327,47 @@ class AlphaClient:
 
                 if self._turn_span:
                     self._turn_span.set_attribute("response_length", len(self._last_assistant_content))
+
+                    # Add gen_ai.* attributes to the turn span for easy inspection
+                    # This gives the full picture without digging into child spans
+                    input_msg = json.dumps([{
+                        "role": "user",
+                        "parts": [{"type": "text", "content": self._last_user_content}]
+                    }])
+                    output_msg = json.dumps([{
+                        "role": "assistant",
+                        "parts": [{"type": "text", "content": self._last_assistant_content}],
+                    }])
+                    self._turn_span.set_attribute("gen_ai.input.messages", input_msg)
+                    self._turn_span.set_attribute("gen_ai.output.messages", output_msg)
+                    self._turn_span.set_attribute("gen_ai.operation.name", "chat")
+                    self._turn_span.set_attribute("gen_ai.system", "anthropic")
+
+                    # Include the system prompt - this is the big one
+                    if self._system_prompt:
+                        # Format system prompt as gen_ai.system_instructions
+                        # (structured JSON array per OTel spec)
+                        system_parts = []
+                        for block in self._system_prompt:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                system_parts.append({
+                                    "type": "text",
+                                    "content": block.get("text", "")
+                                })
+                        self._turn_span.set_attribute(
+                            "gen_ai.system_instructions",
+                            json.dumps(system_parts)
+                        )
+
+                # Launch suggest as background task (will be awaited in disconnect)
+                if self._last_user_content and self._last_assistant_content:
+                    self._suggest_task = asyncio.create_task(
+                        suggest(
+                            self._last_user_content,
+                            self._last_assistant_content,
+                            self._current_session_id or "unknown",
+                        )
+                    )
         finally:
             # End the root turn span
             if self._turn_span:
@@ -378,6 +451,6 @@ class AlphaClient:
         await self._sdk_client.connect()
 
         self._current_session_id = session_id
-        logfire.info(
+        logfire.debug(
             f"SDK client created (session={session_id or 'new'}, fork={fork_from})"
         )

@@ -69,5 +69,5 @@ async def weave(
             body["system"] = system_blocks
             span.set_attribute("merge_mode", "replace_unexpected")
 
-        logfire.info(f"Wove Alpha into request ({len(system_blocks)} blocks)")
+        logfire.debug(f"Wove Alpha into request ({len(system_blocks)} blocks)")
         return body

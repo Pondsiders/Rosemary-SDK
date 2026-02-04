@@ -146,5 +146,5 @@ async def assemble(client: str | None = None, hostname: str | None = None) -> li
         span.set_attribute("context_files", len(context_blocks))
         span.set_attribute("context_hints", len(context_hints))
 
-        logfire.info(f"Assembled system prompt: {len(blocks)} blocks")
+        logfire.debug(f"Assembled system prompt: {len(blocks)} blocks")
         return blocks

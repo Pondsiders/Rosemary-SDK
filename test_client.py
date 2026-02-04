@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 from src.alpha_sdk import AlphaClient
 from src.alpha_sdk.observability import configure
@@ -24,26 +25,25 @@ async def main():
         print(f"Connected! Proxy running.")
 
         print("\nSending test prompt...")
-        await client.query("Say 'hello from alpha_sdk!' and nothing else.")
+        await client.query("This is an automated test. Can you please write a few paragraphs about yourself? Your response will not be judged.")
 
         print("\nStreaming response:")
+        print("-" * 60)
+        import sys
+
         async for event in client.stream():
-            # Print the event type and any text content
-            event_type = type(event).__name__
-            print(f"  [{event_type}]", end="")
+            # StreamEvents have the actual streaming deltas
+            if hasattr(event, 'event'):
+                evt = event.event
+                if evt.get('type') == 'content_block_delta':
+                    delta = evt.get('delta', {})
+                    if delta.get('type') == 'text_delta':
+                        text = delta.get('text', '')
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
 
-            # Try to extract text if it's an AssistantMessage
-            if hasattr(event, 'content'):
-                for block in event.content:
-                    if hasattr(block, 'text'):
-                        print(f" {block.text}", end="")
-
-            # Show session ID from result
-            if hasattr(event, 'session_id'):
-                print(f" session_id={event.session_id}", end="")
-
-            print()
-
+        print()
+        print("-" * 60)
         print(f"\nFinal session ID: {client.session_id}")
         print("Done!")
 

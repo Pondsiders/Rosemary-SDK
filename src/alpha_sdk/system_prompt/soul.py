@@ -45,7 +45,7 @@ def _read_from_git(filename: str, ref: str = "HEAD") -> str | None:
             timeout=5,
         ).stdout.strip()
 
-        logfire.info(f"Loaded {filename} from git (commit={commit}, {len(result.stdout)} chars)")
+        logfire.debug(f"Loaded {filename} from git (commit={commit}, {len(result.stdout)} chars)")
         return result.stdout
 
     except Exception as e:
@@ -57,7 +57,7 @@ def init() -> None:
     """Initialize the soul at startup. Call once."""
     global _soul_prompt, _compact_prompt
 
-    logfire.info("Initializing Alpha soul...")
+    logfire.debug("Initializing Alpha soul...")
 
     _soul_prompt = _read_from_git(SOUL_FILE)
     if _soul_prompt is None:

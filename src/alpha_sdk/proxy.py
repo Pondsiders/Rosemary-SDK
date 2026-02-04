@@ -2,22 +2,31 @@
 
 Runs an aiohttp server in the same event loop as the SDK client:
 1. Receives requests from Claude Agent SDK (via Claude Code subprocess)
-2. Transforms them via weave()
-3. Forwards to Anthropic
-4. Streams responses back
+2. Checks for canary in the last user message content block
+3. If canary present: weave (inject Alpha's soul), strip canary
+4. If canary absent: pass through unchanged (internal SDK call)
+5. Forwards to Anthropic
+6. Streams responses back
 
 Because it's async in the same event loop, all spans share trace context.
 One turn → one span → everything nested inside.
 """
 
 import asyncio
+import json
 import socket
 from contextlib import nullcontext
-from typing import Any, Callable, Awaitable
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .client import AlphaClient
 
 import httpx
 import logfire
 from aiohttp import web
+
+from .canary import is_canary_block
+from .attributes import request_attributes
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 
@@ -51,9 +60,11 @@ class AlphaProxy:
     """Async proxy server for intercepting SDK requests.
 
     Runs in the same event loop as the caller, enabling shared trace context.
+    Has direct access to AlphaClient state (system prompt, etc.) since they
+    share the same process and event loop.
 
     Usage:
-        proxy = AlphaProxy(weaver=weave, client="duckpond")
+        proxy = AlphaProxy(alpha_client=client)
         await proxy.start()
 
         os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
@@ -66,22 +77,13 @@ class AlphaProxy:
         await proxy.stop()
     """
 
-    def __init__(
-        self,
-        weaver: Callable[[dict, str | None, str | None], Awaitable[dict]],
-        client: str | None = None,
-        hostname: str | None = None,
-    ):
+    def __init__(self, alpha_client: "AlphaClient"):  # noqa: F821 - forward reference
         """Initialize the proxy.
 
         Args:
-            weaver: Async function to transform request bodies
-            client: Client name (for logging, passed to weaver)
-            hostname: Machine hostname (passed to weaver)
+            alpha_client: The AlphaClient instance (for accessing system prompt, etc.)
         """
-        self.weaver = weaver
-        self.client = client
-        self.hostname = hostname
+        self.alpha_client = alpha_client
 
         self._port: int | None = None
         self._app: web.Application | None = None
@@ -111,7 +113,7 @@ class AlphaProxy:
         self._site = web.TCPSite(self._runner, "127.0.0.1", self._port)
         await self._site.start()
 
-        logfire.info(f"Alpha proxy started on port {self._port}")
+        logfire.debug(f"Alpha proxy started on port {self._port}")
         return self._port
 
     async def stop(self) -> None:
@@ -127,7 +129,7 @@ class AlphaProxy:
         self._site = None
         self._app = None
 
-        logfire.info("Alpha proxy stopped")
+        logfire.debug("Alpha proxy stopped")
 
     @property
     def base_url(self) -> str:
@@ -150,6 +152,47 @@ class AlphaProxy:
             ctx: Trace context from logfire.get_context()
         """
         self._trace_context = ctx
+
+    def _check_and_strip_canary(self, body: dict) -> bool:
+        """Check if the request has our canary, and strip it if so.
+
+        The canary is the last content block in the last user message.
+        If found, we remove it (it's just routing metadata) and return True.
+
+        Args:
+            body: The request body (modified in place if canary found)
+
+        Returns:
+            True if canary was found and stripped, False otherwise
+        """
+        messages = body.get("messages", [])
+        if not messages:
+            return False
+
+        # Find the last user message
+        last_user_msg = None
+        last_user_idx = -1
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_msg = msg
+                last_user_idx = i
+
+        if last_user_msg is None:
+            return False
+
+        # Check if content is a list (could be string for simple messages)
+        content = last_user_msg.get("content")
+        if not isinstance(content, list) or len(content) == 0:
+            return False
+
+        # Check the last content block
+        last_block = content[-1]
+        if is_canary_block(last_block):
+            # Strip the canary block - it's just routing metadata
+            content.pop()
+            return True
+
+        return False
 
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         """Handle incoming requests from the SDK."""
@@ -199,10 +242,46 @@ class AlphaProxy:
             # Not JSON - forward as-is (shouldn't happen for messages API)
             body = None
 
-        # Transform via weave (if it's JSON and we have a weaver)
-        if body is not None and self.weaver:
-            body = await self.weaver(body, self.client, self.hostname)
-            span.set_attribute("transformed", True)
+        # Check for canary in the last user message
+        should_weave = False
+        if body is not None:
+            should_weave = self._check_and_strip_canary(body)
+            span.set_attribute("has_canary", should_weave)
+
+        # Inject system prompt if canary was present
+        if should_weave:
+            system_prompt = self.alpha_client._system_prompt
+            if system_prompt:
+                # Preserve SDK's billing header if present
+                existing_system = body.get("system")
+                if isinstance(existing_system, list) and len(existing_system) >= 1:
+                    # SDK sends: [0]=billing header, keep it
+                    billing_header = existing_system[0]
+                    body["system"] = [billing_header] + system_prompt
+                    span.set_attribute("merge_mode", "keep_billing_header")
+                else:
+                    body["system"] = system_prompt
+                    span.set_attribute("merge_mode", "replace")
+
+                span.set_attribute("woven", True)
+                span.set_attribute("system_blocks", len(system_prompt))
+                logfire.debug(f"Injected system prompt ({len(system_prompt)} blocks)")
+            else:
+                logfire.warn("Canary present but no system prompt on client")
+                span.set_attribute("woven", False)
+        elif body is not None:
+            span.set_attribute("woven", False)
+            logfire.debug("Pass-through (no canary)")
+
+        # Add gen_ai.* attributes for Logfire Model Run panel
+        # Note: response attributes (tokens, finish_reason) would require parsing
+        # the SSE stream, which we don't do—we just pipe chunks through.
+        # The SDK gets usage info from ResultMessage anyway.
+        if body is not None:
+            # Extract session_id from the messages if available (canary had it)
+            session_id = None  # TODO: extract from envelope if needed
+            for attr_name, attr_value in request_attributes(body, session_id).items():
+                span.set_attribute(attr_name, attr_value)
 
         # Build headers - forward auth headers from SDK
         headers = {}
@@ -241,9 +320,113 @@ class AlphaProxy:
 
             await resp.prepare(request)
 
-            # Stream response body
+            # Stream response body, capturing SSE events for response attributes
+            output_tokens = 0
+            input_tokens = 0
+            stop_reason = None
+            response_model = None
+
+            # Track output content as it streams
+            output_text_parts: list[str] = []
+            tool_calls: list[dict] = []
+            current_tool_index: int = -1
+
             async for chunk in response.aiter_bytes():
                 await resp.write(chunk)
+
+                # Parse SSE events for usage stats and output content
+                # Format: "event: message_delta\ndata: {...}\n\n"
+                try:
+                    chunk_str = chunk.decode("utf-8", errors="ignore")
+                    for line in chunk_str.split("\n"):
+                        if line.startswith("data: "):
+                            data = json.loads(line[6:])
+                            event_type = data.get("type")
+
+                            if event_type == "message_start":
+                                # Initial message has input tokens and model
+                                msg = data.get("message", {})
+                                usage = msg.get("usage", {})
+                                input_tokens = usage.get("input_tokens", 0)
+                                response_model = msg.get("model")
+
+                            elif event_type == "content_block_start":
+                                # New content block starting
+                                block = data.get("content_block", {})
+                                if block.get("type") == "tool_use":
+                                    tool_calls.append({
+                                        "id": block.get("id", ""),
+                                        "name": block.get("name", ""),
+                                        "input_json": "",
+                                    })
+                                    current_tool_index = len(tool_calls) - 1
+
+                            elif event_type == "content_block_delta":
+                                # Content streaming in
+                                delta = data.get("delta", {})
+                                delta_type = delta.get("type")
+
+                                if delta_type == "text_delta":
+                                    output_text_parts.append(delta.get("text", ""))
+
+                                elif delta_type == "input_json_delta":
+                                    # Tool call input streaming (JSON fragments)
+                                    if current_tool_index >= 0:
+                                        tool_calls[current_tool_index]["input_json"] += delta.get("partial_json", "")
+
+                            elif event_type == "message_delta":
+                                # Final delta has output tokens and stop reason
+                                delta = data.get("delta", {})
+                                usage = data.get("usage", {})
+                                if usage.get("output_tokens"):
+                                    output_tokens = usage["output_tokens"]
+                                if delta.get("stop_reason"):
+                                    stop_reason = delta["stop_reason"]
+                except Exception:
+                    pass  # Don't fail on parse errors, just miss the attributes
+
+            # Build gen_ai.output.messages
+            output_parts: list[dict] = []
+            if output_text_parts:
+                output_parts.append({
+                    "type": "text",
+                    "content": "".join(output_text_parts),
+                })
+            for tool in tool_calls:
+                try:
+                    tool_input = json.loads(tool["input_json"]) if tool["input_json"] else {}
+                except json.JSONDecodeError:
+                    tool_input = {}
+                output_parts.append({
+                    "type": "tool_call",
+                    "id": tool["id"],
+                    "name": tool["name"],
+                    "arguments": tool_input,
+                })
+
+            output_message = {"role": "assistant", "parts": output_parts}
+            if stop_reason:
+                output_message["finish_reason"] = stop_reason
+
+            # Set response attributes
+            if input_tokens:
+                span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+            if output_tokens:
+                span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+            if stop_reason:
+                span.set_attribute("gen_ai.response.finish_reasons", [stop_reason])
+            if response_model:
+                span.set_attribute("gen_ai.response.model", response_model)
+            if output_parts:
+                span.set_attribute("gen_ai.output.messages", json.dumps([output_message]))
+
+            # Determine output type
+            has_tool = any(p.get("type") == "tool_call" for p in output_parts)
+            has_text = any(p.get("type") == "text" for p in output_parts)
+            if has_tool:
+                span.set_attribute("gen_ai.output.type", "json")
+            elif has_text:
+                span.set_attribute("gen_ai.output.type", "text")
 
             await resp.write_eof()
             return resp

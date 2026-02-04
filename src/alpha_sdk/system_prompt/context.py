@@ -66,6 +66,6 @@ def load_context() -> tuple[list[dict], list[str]]:
             logfire.warn(f"Failed to load context file {path}: {e}")
 
     if all_blocks or when_hints:
-        logfire.info(f"Loaded {len(all_blocks)} context(s), {len(when_hints)} hint(s)")
+        logfire.debug(f"Loaded {len(all_blocks)} context(s), {len(when_hints)} hint(s)")
 
     return all_blocks, when_hints
