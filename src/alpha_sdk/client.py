@@ -29,8 +29,16 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     TextBlock,
+    UserMessage,
 )
-from claude_agent_sdk.types import StreamEvent, HookMatcher, PreCompactHookInput, HookContext
+from claude_agent_sdk.types import (
+    StreamEvent,
+    HookMatcher,
+    PreCompactHookInput,
+    HookContext,
+    ToolUseBlock,
+    ToolResultBlock,
+)
 
 from .memories.recall import recall
 from .memories.suggest import suggest
@@ -353,9 +361,6 @@ class AlphaClient:
         """
         if not self._sdk_client:
             raise RuntimeError("Client not connected. Call connect() first.")
-
-        # Import SDK types we need for isinstance checks
-        from claude_agent_sdk.types import UserMessage, ToolUseBlock, ToolResultBlock
 
         try:
             with logfire.span("alpha.stream") as span:
