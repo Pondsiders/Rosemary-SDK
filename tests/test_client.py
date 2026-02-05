@@ -10,8 +10,8 @@ import asyncio
 import logging
 import sys
 
-from src.alpha_sdk import AlphaClient
-from src.alpha_sdk.observability import configure
+from alpha_sdk import AlphaClient
+from alpha_sdk.observability import configure
 
 # Configure Logfire - will send to https://logfire-us.pydantic.dev/jefferyharrell/pondside
 configure("alpha_sdk_test")

@@ -162,7 +162,7 @@ class AlphaClient:
 
     # The model that IS Alpha. Pinned at the SDK level, not configurable per-client.
     # When we upgrade Alpha to a new model, we bump alpha_sdk version.
-    ALPHA_MODEL = "claude-opus-4-5-20251101"
+    ALPHA_MODEL = "claude-opus-4-6"
 
     def __init__(
         self,
