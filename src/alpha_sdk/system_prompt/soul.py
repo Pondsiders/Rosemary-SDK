@@ -34,7 +34,7 @@ def _read_from_git(filename: str, ref: str = "HEAD") -> str | None:
             timeout=5,
         )
         if result.returncode != 0:
-            logfire.warn(f"git show {ref}:{filename} failed: {result.stderr}")
+            logfire.warning(f"git show {ref}:{filename} failed: {result.stderr}")
             return None
 
         commit = subprocess.run(
@@ -67,7 +67,7 @@ def init() -> None:
 
     _compact_prompt = _read_from_git(COMPACT_FILE)
     if _compact_prompt is None:
-        logfire.warn("Compact prompt not loaded, will use fallback")
+        logfire.warning("Compact prompt not loaded, will use fallback")
 
 
 def get_soul() -> str:

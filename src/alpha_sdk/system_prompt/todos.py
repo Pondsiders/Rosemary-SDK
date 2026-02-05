@@ -23,13 +23,14 @@ async def get_todos() -> str | None:
     """
     try:
         r = await _get_redis()
-        todos = await r.get("hud:todos")
-        await r.aclose()
-
-        if todos:
-            return f"## Todos\n\n{todos}"
-        return None
+        try:
+            todos = await r.get("hud:todos")
+            if todos:
+                return f"## Todos\n\n{todos}"
+            return None
+        finally:
+            await r.aclose()
 
     except Exception as e:
-        logfire.warn(f"Error fetching todos: {e}")
+        logfire.warning(f"Error fetching todos: {e}")
         return None

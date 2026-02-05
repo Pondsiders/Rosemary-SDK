@@ -419,7 +419,7 @@ class CompactProxy:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             if not self._warned_no_api_key:
-                logfire.warn(
+                logfire.warning(
                     "Token counting disabled: ANTHROPIC_API_KEY not set. "
                     "Set this environment variable to enable context-o-meter."
                 )

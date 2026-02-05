@@ -1,7 +1,7 @@
 """Memory suggestion - what's memorable from this turn?
 
 After each turn completes, asks OLMo what moments are worth remembering.
-Results accumulate in Redis for injection on subsequent turns.
+Results are returned to the caller (AlphaClient) for injection on the next turn.
 
 This is fire-and-forget - call it as an asyncio task after turn completes.
 """
@@ -12,12 +12,10 @@ from typing import Any
 
 import httpx
 import logfire
-import redis.asyncio as aioredis
 
 # Configuration from environment
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL")
-REDIS_URL = os.environ.get("REDIS_URL")
 
 # Intro's system prompt - their soul, their taste
 INTRO_SYSTEM_PROMPT = """You're Intro. "Intro" for "introspection." You are Alpha's inner voice, her sense of what's memorable.
@@ -76,11 +74,6 @@ TURN_PROMPT_TEMPLATE = """<turn>
 What's memorable from this turn? Be ruthlessly selective—only what would actually hurt to lose.
 Respond with a JSON array of strings. Empty array [] if nothing notable.
 """
-
-
-async def _get_redis() -> aioredis.Redis:
-    """Get Redis client."""
-    return aioredis.from_url(REDIS_URL, decode_responses=True)
 
 
 def _parse_memorables(text: str) -> list[str]:
@@ -159,37 +152,27 @@ async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
             return []
 
 
-async def _store_memorables(session_id: str, memorables: list[str]) -> None:
-    """Append memorables to Redis list for this session."""
-    if not memorables:
-        return
-
-    redis_client = await _get_redis()
-    try:
-        key = f"intro:memorables:{session_id}"
-        await redis_client.rpush(key, *memorables)
-        await redis_client.expire(key, 60 * 60 * 24)  # 24h TTL
-        logfire.info("Memorables stored", session_id=session_id[:8], count=len(memorables))
-    finally:
-        await redis_client.aclose()
-
-
-async def suggest(user_content: str, assistant_content: str, session_id: str) -> None:
+async def suggest(user_content: str, assistant_content: str, session_id: str) -> list[str]:
     """
-    Extract memorables from a turn and store in Redis.
+    Extract memorables from a turn.
 
     Fire-and-forget: call as an asyncio task after turn completes.
-    Results accumulate in Redis at intro:memorables:{session_id}.
+    Returns the list of memorable strings for the caller to hold.
 
     Args:
         user_content: What Jeffery said this turn
         assistant_content: What Alpha said this turn
         session_id: Current session ID
+
+    Returns:
+        List of memorable strings (empty if nothing notable)
     """
     with logfire.span("suggest", session_id=session_id[:8] if session_id else "none"):
         memorables = await _call_olmo(user_content, assistant_content)
 
         if memorables:
-            await _store_memorables(session_id, memorables)
+            logfire.info("Memorables extracted", session_id=session_id[:8], count=len(memorables))
         else:
             logfire.debug("No memorables this turn")
+
+        return memorables

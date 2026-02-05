@@ -23,13 +23,14 @@ async def get_events() -> str | None:
     """
     try:
         r = await _get_redis()
-        calendar = await r.get("hud:calendar")
-        await r.aclose()
-
-        if calendar:
-            return f"## Events\n\n{calendar}"
-        return None
+        try:
+            calendar = await r.get("hud:calendar")
+            if calendar:
+                return f"## Events\n\n{calendar}"
+            return None
+        finally:
+            await r.aclose()
 
     except Exception as e:
-        logfire.warn(f"Error fetching calendar: {e}")
+        logfire.warning(f"Error fetching calendar: {e}")
         return None

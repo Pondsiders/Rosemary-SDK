@@ -151,9 +151,11 @@ async def archive_turn(
                 return ArchiveResult(success=True, rows_inserted=0)
 
             # Insert into Postgres, returning IDs
+            # Track which rows actually got inserted (not skipped by ON CONFLICT)
             row_ids: list[int] = []
+            inserted_contents: list[str] = []
             async with pool.acquire() as conn:
-                for row in rows:
+                for i, row in enumerate(rows):
                     result = await conn.fetchval(
                         """
                         INSERT INTO scribe.messages (timestamp, role, content, session_id)
@@ -165,13 +167,14 @@ async def archive_turn(
                     )
                     if result:
                         row_ids.append(result)
+                        inserted_contents.append(contents[i])
 
             sid_short = session_id[:8] if session_id else "none"
             logfire.info("Archived turn", rows=len(row_ids), session_id=sid_short)
 
             # Fire off embedding task (non-blocking)
             if row_ids:
-                asyncio.create_task(_embed_rows(row_ids, contents))
+                asyncio.create_task(_embed_rows(row_ids, inserted_contents))
 
             return ArchiveResult(
                 success=True,

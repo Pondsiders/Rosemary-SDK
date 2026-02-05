@@ -4,7 +4,6 @@ Client name, hostname, weather, astronomy.
 Answers the question: what's the situation?
 """
 
-import asyncio
 import os
 import socket
 
@@ -28,11 +27,13 @@ async def get_weather() -> str | None:
     """Fetch weather from Redis."""
     try:
         r = await _get_redis()
-        weather = await r.get("hud:weather")
-        await r.aclose()
-        return weather
+        try:
+            weather = await r.get("hud:weather")
+            return weather
+        finally:
+            await r.aclose()
     except Exception as e:
-        logfire.warn(f"Error fetching weather: {e}")
+        logfire.warning(f"Error fetching weather: {e}")
         return None
 
 

@@ -20,7 +20,7 @@ CONTEXT_FILE_NAME = "ALPHA.md"
 def find_context_files(root: Path = CONTEXT_ROOT) -> list[Path]:
     """Walk directory tree finding ALPHA.md files."""
     if not root.exists():
-        logfire.warn(f"Context root does not exist: {root}")
+        logfire.warning(f"Context root does not exist: {root}")
         return []
 
     context_files = []
@@ -63,7 +63,7 @@ def load_context() -> tuple[list[dict], list[str]]:
                 logfire.debug(f"Added context hint for {rel_path}")
 
         except Exception as e:
-            logfire.warn(f"Failed to load context file {path}: {e}")
+            logfire.warning(f"Failed to load context file {path}: {e}")
 
     if all_blocks or when_hints:
         logfire.debug(f"Loaded {len(all_blocks)} context(s), {len(when_hints)} hint(s)")

@@ -10,11 +10,10 @@ Architecture:
 import asyncio
 import json
 import os
-from typing import Any, AsyncGenerator, AsyncIterable, Literal
+from typing import Any, AsyncGenerator, Literal
 
 import logfire
 import pendulum
-import redis.asyncio as aioredis
 
 # Permission modes supported by Claude Agent SDK
 PermissionMode = Literal[
@@ -48,9 +47,6 @@ from .memories.suggest import suggest
 from .sessions import list_sessions, get_session_path, get_sessions_dir, SessionInfo
 from .system_prompt import assemble
 from .system_prompt.soul import get_soul
-
-# Redis URL for memorables
-REDIS_URL = os.environ.get("REDIS_URL", "redis://alpha-pi:6379")
 
 # Store original ANTHROPIC_BASE_URL so we can restore it
 _ORIGINAL_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")
@@ -108,36 +104,8 @@ def _format_memory(memory: dict) -> str:
         pass
 
     # Include score if present (helps with debugging/transparency)
-    score_str = f", score {score:.2f}" if score else ""
+    score_str = f", score {score:.2f}" if score is not None else ""
     return f"## Memory #{mem_id} ({relative_time}{score_str})\n{content}"
-
-
-async def _get_pending_memorables(session_id: str) -> list[str] | None:
-    """Get pending memorables from Redis and clear them.
-
-    Returns:
-        List of memorable strings, or None if none pending
-    """
-    if not REDIS_URL:
-        return None
-
-    try:
-        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-        key = f"intro:memorables:{session_id}"
-
-        # Get all memorables
-        memorables = await redis_client.lrange(key, 0, -1)
-
-        # Clear them (we've consumed them)
-        if memorables:
-            await redis_client.delete(key)
-
-        await redis_client.aclose()
-        return memorables if memorables else None
-
-    except Exception as e:
-        logfire.warn(f"Failed to get memorables: {e}")
-        return None
 
 
 class AlphaClient:
@@ -213,6 +181,7 @@ class AlphaClient:
         self._last_assistant_content: str = ""
         self._turn_span: logfire.LogfireSpan | None = None
         self._suggest_task: asyncio.Task | None = None
+        self._pending_memorables: list[str] = []  # From last suggest, consumed on next query
 
         # Compaction flag - set by PreCompact hook, cleared after re-orientation
         self._needs_reorientation: bool = False
@@ -393,14 +362,13 @@ class AlphaClient:
                 self._needs_reorientation = False
 
             # Check for memorables from previous turn (the nudge)
-            if self._current_session_id:
-                memorables = await _get_pending_memorables(self._current_session_id)
-                if memorables:
-                    nudge = "## Intro speaks\n\n"
-                    nudge += "Alpha, consider storing these from the previous turn:\n"
-                    nudge += "\n".join(f"- {m}" for m in memorables)
-                    content_blocks.append({"type": "text", "text": nudge})
-                    span.set_attribute("memorables_nudged", len(memorables))
+            if self._pending_memorables:
+                nudge = "## Intro speaks\n\n"
+                nudge += "Alpha, consider storing these from the previous turn:\n"
+                nudge += "\n".join(f"- {m}" for m in self._pending_memorables)
+                content_blocks.append({"type": "text", "text": nudge})
+                span.set_attribute("memorables_nudged", len(self._pending_memorables))
+                self._pending_memorables = []  # Consumed
 
             # Recall memories for this prompt
             memories = await recall(prompt_text, self._current_session_id or "new")
@@ -674,15 +642,21 @@ class AlphaClient:
                 if self._turn_span:
                     self._turn_span.set_attribute("response_length", len(self._last_assistant_content))
 
-                # Launch suggest as background task
+                # Launch suggest as background task (results land in _pending_memorables)
                 if self._last_user_content and self._last_assistant_content:
-                    self._suggest_task = asyncio.create_task(
-                        suggest(
-                            self._last_user_content,
-                            self._last_assistant_content,
-                            self._current_session_id or "unknown",
-                        )
-                    )
+                    async def _run_suggest():
+                        try:
+                            memorables = await suggest(
+                                self._last_user_content,
+                                self._last_assistant_content,
+                                self._current_session_id or "unknown",
+                            )
+                            if memorables:
+                                self._pending_memorables.extend(memorables)
+                        except Exception as e:
+                            logfire.warning(f"Suggest task failed: {e}")
+
+                    self._suggest_task = asyncio.create_task(_run_suggest())
 
                 # Archive the turn to Scribe (fire-and-forget)
                 if self.archive and self._last_user_content:
@@ -726,6 +700,15 @@ class AlphaClient:
         if self._compact_proxy:
             return self._compact_proxy.context_window
         return CompactProxy.DEFAULT_CONTEXT_WINDOW
+
+    def clear_memorables(self) -> int:
+        """Clear pending memorables and return how many were cleared.
+
+        Used by Cortex store tool as feedback mechanism.
+        """
+        count = len(self._pending_memorables)
+        self._pending_memorables = []
+        return count
 
     # -------------------------------------------------------------------------
     # Internal

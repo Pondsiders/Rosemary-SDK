@@ -46,7 +46,7 @@ async def _get_hud_extras() -> dict:
             "today_so_far_time": today_so_far_time if not isinstance(today_so_far_time, Exception) else None,
         }
     except Exception as e:
-        logfire.warn(f"Error fetching HUD extras: {e}")
+        logfire.warning(f"Error fetching HUD extras: {e}")
         return {}
 
 

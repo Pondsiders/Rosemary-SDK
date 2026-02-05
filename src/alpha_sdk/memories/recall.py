@@ -18,12 +18,10 @@ from typing import Any
 
 import httpx
 import logfire
-import redis.asyncio as aioredis
 
 from .cortex import search as cortex_search
 
 # Configuration from environment
-REDIS_URL = os.environ.get("REDIS_URL")
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL")
 
@@ -55,25 +53,32 @@ If there are no peripheral details worth searching (just one focused topic), ret
 Return only the JSON object, nothing else."""
 
 
-async def _get_redis() -> aioredis.Redis:
-    """Get Redis client."""
-    return aioredis.from_url(REDIS_URL, decode_responses=True)
+
+# Module-level seen-IDs cache, keyed by session_id.
+# This lives in-process (no Redis needed). Reset on session change.
+_seen_ids: dict[str, set[int]] = {}
 
 
-async def _get_seen_ids(redis_client: aioredis.Redis, session_id: str) -> list[int]:
-    """Get the list of memory IDs already seen this session."""
-    key = f"memories:seen:{session_id}"
-    members = await redis_client.smembers(key)
-    return [int(m) for m in members]
+def get_seen_ids(session_id: str) -> set[int]:
+    """Get the set of memory IDs already seen this session."""
+    return _seen_ids.get(session_id, set())
 
 
-async def _mark_seen(redis_client: aioredis.Redis, session_id: str, memory_ids: list[int]) -> None:
+def mark_seen(session_id: str, memory_ids: list[int]) -> None:
     """Mark memory IDs as seen for this session."""
     if not memory_ids:
         return
-    key = f"memories:seen:{session_id}"
-    await redis_client.sadd(key, *[str(m) for m in memory_ids])
-    await redis_client.expire(key, 60 * 60 * 24)  # 24h TTL
+    if session_id not in _seen_ids:
+        _seen_ids[session_id] = set()
+    _seen_ids[session_id].update(memory_ids)
+
+
+def clear_seen(session_id: str | None = None) -> None:
+    """Clear seen IDs for a session (or all sessions if None)."""
+    if session_id:
+        _seen_ids.pop(session_id, None)
+    else:
+        _seen_ids.clear()
 
 
 async def _extract_queries(message: str) -> list[str]:
@@ -186,7 +191,7 @@ async def recall(prompt: str, session_id: str) -> list[dict[str, Any]]:
     1. Direct embedding search (fast, semantic similarity)
     2. OLMo query extraction + search (slower, catches distinctive terms)
 
-    Results are merged and deduped. Filters via Redis seen-cache.
+    Results are merged and deduped. Filters via in-process seen-cache.
 
     Args:
         prompt: The user's message
@@ -196,58 +201,54 @@ async def recall(prompt: str, session_id: str) -> list[dict[str, Any]]:
         List of memory dicts with keys: id, content, created_at, score
     """
     with logfire.span("recall", session_id=session_id[:8] if session_id else "none") as span:
-        redis_client = await _get_redis()
-        try:
-            seen_ids = await _get_seen_ids(redis_client, session_id)
-            logfire.debug("Seen IDs loaded", count=len(seen_ids))
+        seen = get_seen_ids(session_id)
+        seen_list = list(seen)
+        logfire.debug("Seen IDs loaded", count=len(seen_list))
 
-            # Run direct search and query extraction in parallel
-            direct_task = cortex_search(
-                query=prompt,
-                limit=DIRECT_LIMIT,
-                exclude=seen_ids if seen_ids else None,
-                min_score=MIN_SCORE,
-            )
-            extract_task = _extract_queries(prompt)
+        # Run direct search and query extraction in parallel
+        direct_task = cortex_search(
+            query=prompt,
+            limit=DIRECT_LIMIT,
+            exclude=seen_list if seen_list else None,
+            min_score=MIN_SCORE,
+        )
+        extract_task = _extract_queries(prompt)
 
-            direct_memories, extracted_queries = await asyncio.gather(direct_task, extract_task)
+        direct_memories, extracted_queries = await asyncio.gather(direct_task, extract_task)
 
-            span.set_attribute("extracted_queries", extracted_queries)
-            span.set_attribute("direct_memory_ids", [m["id"] for m in direct_memories])
+        span.set_attribute("extracted_queries", extracted_queries)
+        span.set_attribute("direct_memory_ids", [m["id"] for m in direct_memories])
 
-            # Build exclude list for extracted searches
-            exclude_for_extracted = set(seen_ids)
-            for mem in direct_memories:
-                exclude_for_extracted.add(mem["id"])
+        # Build exclude list for extracted searches
+        exclude_for_extracted = set(seen_list)
+        for mem in direct_memories:
+            exclude_for_extracted.add(mem["id"])
 
-            # Search extracted queries
-            extracted_memories = await _search_extracted_queries(
-                extracted_queries,
-                list(exclude_for_extracted),
-            )
+        # Search extracted queries
+        extracted_memories = await _search_extracted_queries(
+            extracted_queries,
+            list(exclude_for_extracted),
+        )
 
-            span.set_attribute("extracted_memory_ids", [m["id"] for m in extracted_memories])
+        span.set_attribute("extracted_memory_ids", [m["id"] for m in extracted_memories])
 
-            # Merge: extracted first, then direct
-            all_memories = extracted_memories + direct_memories
-            span.set_attribute("total_memories", len(all_memories))
+        # Merge: extracted first, then direct
+        all_memories = extracted_memories + direct_memories
+        span.set_attribute("total_memories", len(all_memories))
 
-            if not all_memories:
-                logfire.info("No memories above threshold")
-                return []
+        if not all_memories:
+            logfire.info("No memories above threshold")
+            return []
 
-            # Mark as seen
-            new_ids = [m["id"] for m in all_memories]
-            await _mark_seen(redis_client, session_id, new_ids)
+        # Mark as seen (in-process, no Redis)
+        new_ids = [m["id"] for m in all_memories]
+        mark_seen(session_id, new_ids)
 
-            logfire.debug(
-                "Recall complete",
-                extracted=len(extracted_memories),
-                direct=len(direct_memories),
-                total=len(all_memories),
-            )
+        logfire.debug(
+            "Recall complete",
+            extracted=len(extracted_memories),
+            direct=len(direct_memories),
+            total=len(all_memories),
+        )
 
-            return all_memories
-
-        finally:
-            await redis_client.aclose()
+        return all_memories

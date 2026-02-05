@@ -153,7 +153,7 @@ def search_cmd(
 
     for mem in memories:
         score = mem.get("score")
-        score_str = f"[{score:.2f}]" if score else ""
+        score_str = f"[{score:.2f}]" if score is not None else ""
         # Parse UTC timestamp and convert to local time
         created_at = mem.get("created_at", "")
         if created_at:

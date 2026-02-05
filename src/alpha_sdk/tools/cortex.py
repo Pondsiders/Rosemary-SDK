@@ -1,7 +1,7 @@
 """Cortex memory tools - native MCP server for alpha_sdk.
 
 Direct Postgres access—no HTTP layer, no Cortex service dependency.
-The store() tool clears the Redis memorables buffer as a side effect,
+The store() tool clears the pending memorables buffer as a side effect,
 closing the feedback loop with Intro.
 
 Usage:
@@ -13,53 +13,25 @@ Usage:
     }
 """
 
-import os
 from typing import Any, Callable
 
 import logfire
-import redis.asyncio as redis
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
 from ..memories import store as cortex_store, search as cortex_search, recent as cortex_recent
 
-# Configuration from environment
-REDIS_URL = os.environ.get("REDIS_URL", "redis://alpha-pi:6379")
 
-
-async def _get_redis() -> redis.Redis:
-    """Get Redis client."""
-    return redis.from_url(REDIS_URL, decode_responses=True)
-
-
-async def _clear_memorables(session_id: str | None) -> int:
-    """Clear the memorables buffer for this session.
-
-    Returns the number of items that were cleared.
-    """
-    if not session_id:
-        return 0
-
-    redis_client = await _get_redis()
-    try:
-        key = f"intro:memorables:{session_id}"
-        # Get count before deleting
-        count = await redis_client.llen(key)
-        if count > 0:
-            await redis_client.delete(key)
-            logfire.info("Cleared memorables buffer", session_id=session_id[:8], count=count)
-        return count
-    finally:
-        await redis_client.aclose()
-
-
-def create_cortex_server(get_session_id: Callable[[], str | None] | None = None):
+def create_cortex_server(
+    get_session_id: Callable[[], str | None] | None = None,
+    clear_memorables: Callable[[], int] | None = None,
+):
     """Create the Cortex MCP server.
 
     Args:
         get_session_id: Optional callable that returns the current session ID.
-                       Used for clearing memorables buffer after store().
-                       If not provided, memorables won't be cleared.
+        clear_memorables: Optional callable that clears pending memorables and
+                         returns the count cleared. Provided by AlphaClient.
 
     Returns:
         MCP server configuration dict
@@ -90,7 +62,7 @@ def create_cortex_server(get_session_id: Callable[[], str | None] | None = None)
                 logfire.info("Memory stored", memory_id=memory_id)
 
                 # Clear the memorables buffer - this is the feedback mechanism
-                cleared = await _clear_memorables(session_id)
+                cleared = clear_memorables() if clear_memorables else 0
 
                 # Build response
                 response_text = f"Memory stored (id: {memory_id})"
