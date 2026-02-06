@@ -62,8 +62,13 @@ async def _embed(prompt: str, timeout: float = 5.0) -> list[float]:
             logfire.warning(f"Ollama timeout after {timeout}s")
             raise EmbeddingError("Embedding service timed out")
         except httpx.HTTPStatusError as e:
-            logfire.warning(f"Ollama HTTP error: {e.response.status_code}")
-            raise EmbeddingError(f"Embedding service error: {e.response.status_code}")
+            body = e.response.text[:500] if e.response else "no response body"
+            logfire.warning(
+                "Ollama HTTP error: {status_code} - {body}",
+                status_code=e.response.status_code,
+                body=body,
+            )
+            raise EmbeddingError(f"Embedding service error {e.response.status_code}: {body}")
         except httpx.ConnectError:
             logfire.warning(f"Ollama unreachable at {OLLAMA_URL}")
             raise EmbeddingError("Embedding service unreachable")

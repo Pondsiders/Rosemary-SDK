@@ -705,6 +705,24 @@ class AlphaClient:
             return self._compact_proxy.context_window
         return CompactProxy.DEFAULT_CONTEXT_WINDOW
 
+    @property
+    def usage_7d(self) -> float | None:
+        """Get the 7-day (weekly) usage as a float 0.0-1.0, or None if not yet known.
+
+        Extracted from Anthropic response headers on every API call.
+        Multiply by 100 for percentage.
+        """
+        if self._compact_proxy:
+            return self._compact_proxy.usage_7d
+        return None
+
+    @property
+    def usage_5h(self) -> float | None:
+        """Get the 5-hour usage as a float 0.0-1.0, or None if not yet known."""
+        if self._compact_proxy:
+            return self._compact_proxy.usage_5h
+        return None
+
     def set_token_count_callback(self, callback: "TokenCountCallback | None") -> None:
         """Set or replace the token count callback.
 

@@ -338,6 +338,10 @@ class CompactProxy:
         self._token_count = 0
         self._warned_no_api_key = False
 
+        # Usage quota state (from Anthropic response headers)
+        self._usage_7d: float | None = None  # 0.0-1.0, weekly budget utilization
+        self._usage_5h: float | None = None  # 0.0-1.0, 5-hour window utilization
+
     def set_trace_context(self, ctx: dict) -> None:
         """Set the trace context for request handlers.
 
@@ -399,6 +403,16 @@ class CompactProxy:
     def context_window(self) -> int:
         """Get the context window size."""
         return self._context_window
+
+    @property
+    def usage_7d(self) -> float | None:
+        """Get the 7-day (weekly) usage as a float 0.0-1.0, or None if not yet known."""
+        return self._usage_7d
+
+    @property
+    def usage_5h(self) -> float | None:
+        """Get the 5-hour usage as a float 0.0-1.0, or None if not yet known."""
+        return self._usage_5h
 
     def reset_token_count(self) -> None:
         """Reset token count to 0. Call this after compaction."""
@@ -528,6 +542,37 @@ class CompactProxy:
         except Exception as e:
             logfire.warning(f"Failed to capture request: {e}")
 
+    def _sniff_usage_headers(self, headers: httpx.Headers, span: logfire.LogfireSpan) -> None:
+        """Extract usage quota from Anthropic response headers.
+
+        Headers are floats 0.0-1.0 representing budget utilization:
+        - anthropic-ratelimit-unified-7d-utilization: weekly budget
+        - anthropic-ratelimit-unified-5h-utilization: 5-hour window
+        """
+        util_7d = headers.get("anthropic-ratelimit-unified-7d-utilization")
+        util_5h = headers.get("anthropic-ratelimit-unified-5h-utilization")
+
+        if util_7d is not None:
+            try:
+                self._usage_7d = float(util_7d)
+                span.set_attribute("usage_7d", self._usage_7d)
+            except ValueError:
+                pass
+
+        if util_5h is not None:
+            try:
+                self._usage_5h = float(util_5h)
+                span.set_attribute("usage_5h", self._usage_5h)
+            except ValueError:
+                pass
+
+        if self._usage_7d is not None or self._usage_5h is not None:
+            logfire.debug(
+                "Usage: 7d={usage_7d_pct}%, 5h={usage_5h_pct}%",
+                usage_7d_pct=f"{self._usage_7d * 100:.1f}" if self._usage_7d is not None else "?",
+                usage_5h_pct=f"{self._usage_5h * 100:.1f}" if self._usage_5h is not None else "?",
+            )
+
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         """Handle incoming requests."""
         from contextlib import nullcontext
@@ -608,6 +653,9 @@ class CompactProxy:
             headers=headers,
         ) as response:
             span.set_attribute("status_code", response.status_code)
+
+            # Sniff usage quota headers from Anthropic's response
+            self._sniff_usage_headers(response.headers, span)
 
             resp = web.StreamResponse(status=response.status_code)
 
