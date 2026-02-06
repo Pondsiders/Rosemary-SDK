@@ -10,6 +10,7 @@ Architecture:
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
 
 import logfire
@@ -40,7 +41,6 @@ from claude_agent_sdk.types import (
     ToolResultBlock,
 )
 
-from .agents import load_agents
 from .archive import archive_turn
 from .compact_proxy import CompactProxy, TokenCountCallback
 from .memories.recall import recall
@@ -48,6 +48,9 @@ from .memories.suggest import suggest
 from .sessions import list_sessions, get_session_path, get_sessions_dir, SessionInfo
 from .system_prompt import assemble
 from .system_prompt.soul import get_soul
+
+# The Alpha Plugin — agents, skills, and tools bundled in a sibling repo
+_ALPHA_PLUGIN_DIR = str(Path(__file__).parent.parent.parent.parent / "alpha_plugin")
 
 # Store original ANTHROPIC_BASE_URL so we can restore it
 _ORIGINAL_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")
@@ -803,9 +806,6 @@ class AlphaClient:
             ]
         }
 
-        # Load Alpha's agents from the SDK's bundled agent files
-        agents = load_agents()
-
         # Build options with our system prompt
         options_kwargs = {
             "cwd": self.cwd,
@@ -817,7 +817,8 @@ class AlphaClient:
             "resume": session_id,
             "permission_mode": self.permission_mode,
             "hooks": hooks,
-            "agents": agents,
+            # The Alpha Plugin — agents, skills, and MCP servers in one bundle
+            "plugins": [{"type": "local", "path": _ALPHA_PLUGIN_DIR}],
         }
         options = ClaudeAgentOptions(**options_kwargs)
 
