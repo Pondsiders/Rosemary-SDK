@@ -410,17 +410,21 @@ class CompactProxy:
         """Count tokens in the request and update if it's a new max.
 
         Fire-and-forget: this runs async and doesn't block the main request.
-        Requires ANTHROPIC_API_KEY in environment (warns once if missing).
+        Requires ALPHA_ANTHROPIC_API_KEY in environment (warns once if missing).
+
+        We use a separate env var (not ANTHROPIC_API_KEY) because the Claude Agent SDK
+        will use ANTHROPIC_API_KEY for inference if it exists, overriding Claude Max auth.
+        This key is ONLY for the free /v1/messages/count_tokens endpoint.
         """
         if self._http_client is None:
             return
 
-        # Check for API key - read dynamically in case it was set after module load
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # Check for API key - use ALPHA_ANTHROPIC_API_KEY to avoid SDK interference
+        api_key = os.environ.get("ALPHA_ANTHROPIC_API_KEY")
         if not api_key:
             if not self._warned_no_api_key:
                 logfire.warning(
-                    "Token counting disabled: ANTHROPIC_API_KEY not set. "
+                    "Token counting disabled: ALPHA_ANTHROPIC_API_KEY not set. "
                     "Set this environment variable to enable context-o-meter."
                 )
                 self._warned_no_api_key = True
@@ -441,6 +445,22 @@ class CompactProxy:
                 for key in ("messages", "model", "system", "tools", "tool_choice", "thinking"):
                     if key in body:
                         count_body[key] = body[key]
+
+                # Strip cache_control from tool definitions - the count_tokens endpoint
+                # is stricter than /v1/messages and rejects extra fields in tool schemas
+                if "tools" in count_body:
+                    cleaned_tools = []
+                    for tool in count_body["tools"]:
+                        tool = dict(tool)  # shallow copy
+                        tool.pop("cache_control", None)
+                        # Also clean cache_control from nested custom schema if present
+                        if "custom" in tool and isinstance(tool["custom"], dict):
+                            tool["custom"] = {
+                                k: v for k, v in tool["custom"].items()
+                                if k != "cache_control"
+                            }
+                        cleaned_tools.append(tool)
+                    count_body["tools"] = cleaned_tools
 
                 # Call the token counting endpoint
                 response = await self._http_client.post(

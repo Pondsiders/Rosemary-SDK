@@ -701,6 +701,17 @@ class AlphaClient:
             return self._compact_proxy.context_window
         return CompactProxy.DEFAULT_CONTEXT_WINDOW
 
+    def set_token_count_callback(self, callback: "TokenCountCallback | None") -> None:
+        """Set or replace the token count callback.
+
+        Use this to swap in a per-turn callback that pushes events to
+        the current SSE stream. The CompactProxy doesn't care what
+        function it's holding—it just calls it when the count changes.
+        """
+        self._on_token_count = callback
+        if self._compact_proxy:
+            self._compact_proxy._on_token_count = callback
+
     def clear_memorables(self) -> int:
         """Clear pending memorables and return how many were cleared.
 
