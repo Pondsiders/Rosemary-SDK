@@ -357,7 +357,9 @@ class CompactProxy:
         self._port = _find_free_port()
         self._http_client = httpx.AsyncClient(timeout=300.0)
 
-        self._app = web.Application()
+        # Default client_max_size is 1 MB — way too small for API requests
+        # that carry full conversation history with images. 0 = no limit.
+        self._app = web.Application(client_max_size=0)
         self._app.router.add_route("*", "/{path:.*}", self._handle_request)
 
         self._runner = web.AppRunner(self._app)
@@ -573,6 +575,74 @@ class CompactProxy:
                 usage_5h_pct=f"{self._usage_5h * 100:.1f}" if self._usage_5h is not None else "?",
             )
 
+    def _log_error_response(
+        self,
+        path: str,
+        status_code: int,
+        response_headers: httpx.Headers,
+        response_body: bytes,
+        request_size: int,
+        span: logfire.LogfireSpan,
+    ) -> None:
+        """Log full details of an error response for debugging.
+
+        Captures: status code, all response headers, response body,
+        and the request size that triggered it. Everything goes to Logfire
+        so we can see exactly what Anthropic (or Cloudflare) told us.
+        """
+        # Decode response body (best-effort)
+        try:
+            body_text = response_body.decode("utf-8")
+        except UnicodeDecodeError:
+            body_text = f"<binary, {len(response_body)} bytes>"
+
+        # Try to parse as JSON for structured logging
+        try:
+            body_json = json.loads(body_text)
+        except (json.JSONDecodeError, ValueError):
+            body_json = None
+
+        # Collect ALL response headers
+        all_headers = {k: v for k, v in response_headers.items()}
+
+        # Determine likely source from headers
+        source = "unknown"
+        server = response_headers.get("server", "").lower()
+        if "cloudflare" in server:
+            source = "cloudflare"
+        elif "anthropic" in response_headers.get("x-request-id", ""):
+            source = "anthropic"
+        elif response_headers.get("x-request-id"):
+            source = "anthropic"  # Anthropic sets x-request-id
+
+        with logfire.span(
+            "api_error",
+            _level="error",
+            path=path,
+            status_code=status_code,
+            source=source,
+            request_size_bytes=request_size,
+            request_size_kb=round(request_size / 1024, 1),
+        ) as error_span:
+            error_span.set_attribute("response_headers", json.dumps(all_headers, indent=2))
+            error_span.set_attribute("response_body", body_text[:10000])  # Cap at 10KB
+            if body_json:
+                error_span.set_attribute("error_type", body_json.get("error", {}).get("type", "unknown"))
+                error_span.set_attribute("error_message", body_json.get("error", {}).get("message", "unknown"))
+
+        # Also log a human-readable summary
+        error_msg = ""
+        if body_json and "error" in body_json:
+            error_msg = f" — {body_json['error'].get('type', '?')}: {body_json['error'].get('message', '?')}"
+        logfire.error(
+            "API {status_code} from {source} on {path} (request was {size_kb:.1f} KB){error_msg}",
+            status_code=status_code,
+            source=source,
+            path=path,
+            size_kb=request_size / 1024,
+            error_msg=error_msg,
+        )
+
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         """Handle incoming requests."""
         from contextlib import nullcontext
@@ -646,6 +716,15 @@ class CompactProxy:
         if self._http_client is None:
             raise RuntimeError("HTTP client not initialized")
 
+        # Log request size for diagnostics
+        request_size = len(body_bytes)
+        span.set_attribute("request_size_bytes", request_size)
+        logfire.debug(
+            "Forwarding {path}: {size_kb:.1f} KB",
+            path=path,
+            size_kb=request_size / 1024,
+        )
+
         async with self._http_client.stream(
             "POST",
             url,
@@ -657,6 +736,29 @@ class CompactProxy:
             # Sniff usage quota headers from Anthropic's response
             self._sniff_usage_headers(response.headers, span)
 
+            # On error responses: buffer the body and log everything
+            if response.status_code >= 400:
+                error_body = await response.aread()
+                self._log_error_response(
+                    path=path,
+                    status_code=response.status_code,
+                    response_headers=response.headers,
+                    response_body=error_body,
+                    request_size=request_size,
+                    span=span,
+                )
+
+                # Still pass the error through to the SDK client
+                resp = web.Response(
+                    status=response.status_code,
+                    body=error_body,
+                )
+                for key, value in response.headers.items():
+                    if key.lower() not in SKIP_RESPONSE_HEADERS:
+                        resp.headers[key] = value
+                return resp
+
+            # Success: stream as before
             resp = web.StreamResponse(status=response.status_code)
 
             for key, value in response.headers.items():

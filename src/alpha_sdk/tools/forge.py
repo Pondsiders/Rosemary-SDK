@@ -38,7 +38,7 @@ def create_forge_server():
         "Generate an image from a text prompt. Returns the image directly so you can see it. "
         "The image is also saved to disk. Use descriptive, detailed prompts for best results. "
         "Optional parameters: negative_prompt (what to avoid), steps (inference steps, default 8), "
-        "width/height (default 1024x1024), seed (for reproducibility).",
+        "width/height (default 1152x768, 3:2 widescreen), seed (for reproducibility).",
         {
             "type": "object",
             "properties": {
@@ -56,11 +56,11 @@ def create_forge_server():
                 },
                 "width": {
                     "type": "integer",
-                    "description": "Image width in pixels. Default 1024.",
+                    "description": "Image width in pixels. Default 1152.",
                 },
                 "height": {
                     "type": "integer",
-                    "description": "Image height in pixels. Default 1024.",
+                    "description": "Image height in pixels. Default 768.",
                 },
                 "seed": {
                     "type": "integer",
@@ -80,16 +80,16 @@ def create_forge_server():
             forge_url=FORGE_URL,
         ):
             try:
-                # Build the request payload
-                payload: dict[str, Any] = {"prompt": prompt}
+                # Build the request payload with 3:2 landscape defaults
+                payload: dict[str, Any] = {
+                    "prompt": prompt,
+                    "width": args.get("width", 1152),
+                    "height": args.get("height", 768),
+                }
                 if "negative_prompt" in args:
                     payload["negative_prompt"] = args["negative_prompt"]
                 if "steps" in args:
                     payload["steps"] = args["steps"]
-                if "width" in args:
-                    payload["width"] = args["width"]
-                if "height" in args:
-                    payload["height"] = args["height"]
                 if "seed" in args:
                     payload["seed"] = args["seed"]
 
@@ -119,16 +119,34 @@ def create_forge_server():
                     model=model,
                 )
 
-                # Return both the image (so Alpha can see it) and metadata (so she can reference it)
+                # Re-encode to JPEG/80 for context delivery.
+                # Forge saves at JPEG/90 — re-encoding at 80 shaves ~30% off
+                # the base64 for minimal quality loss. No downscaling: the dream
+                # IS the right size already (1152x768 ≈ 464 tokens, ~200 KB).
+                import base64 as b64_mod
+                from io import BytesIO
+                from PIL import Image
+
+                raw_bytes = b64_mod.b64decode(image_b64)
+                img = Image.open(BytesIO(raw_bytes))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                w, h = img.size
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=80, optimize=True)
+                delivery_b64 = b64_mod.b64encode(buf.getvalue()).decode("utf-8")
+                logfire.info(
+                    f"Dream for MCP: {w}x{h} JPEG/80 "
+                    f"({len(delivery_b64)} chars b64, ~{len(delivery_b64) // 1024} KB)",
+                )
+
+                # MCP spec image format: "type": "image", "data": base64, "mimeType": mime
                 return {
                     "content": [
                         {
                             "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
-                            },
+                            "data": delivery_b64,
+                            "mimeType": "image/jpeg",
                         },
                         {
                             "type": "text",
