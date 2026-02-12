@@ -49,6 +49,7 @@ from .memories.suggest import suggest
 from .sessions import list_sessions, get_session_path, get_sessions_dir, SessionInfo
 from .system_prompt import assemble
 from .tools.cortex import create_cortex_server
+from .tools.fetch import create_fetch_server
 from .tools.forge import create_forge_server
 from .system_prompt.soul import get_soul
 
@@ -910,6 +911,7 @@ class AlphaClient:
                 get_session_id=lambda: self._current_session_id,
                 clear_memorables=self.clear_memorables,
             ),
+            "fetch": create_fetch_server(),
             "forge": create_forge_server(),
         }
         # Consumer-provided servers override internal ones with the same name
@@ -920,6 +922,7 @@ class AlphaClient:
             "mcp__cortex__store",
             "mcp__cortex__search",
             "mcp__cortex__recent",
+            "mcp__fetch__fetch",
             "mcp__forge__imagine",
         ]
         allowed = list(self.allowed_tools or [])
