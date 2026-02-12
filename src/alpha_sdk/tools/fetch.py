@@ -7,6 +7,7 @@ Fetches any URL and returns content in a format Alpha can work with:
 - GitHub URLs are rewritten to fetch raw content (README, source files)
 - JSON APIs return formatted inline
 - RSS/Atom feeds parsed into clean readable summaries
+- YouTube videos return metadata + transcript (via yt-dlp, no video download)
 - Cloudflare Browser Rendering available for JS-heavy pages (render=true)
 
 Three tiers:
@@ -61,6 +62,132 @@ _GITHUB_BLOB_RE = re.compile(
 _GITHUB_TREE_RE = re.compile(
     r"^https?://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.+?)/?$"
 )
+
+
+# YouTube URL patterns
+_YOUTUBE_RE = re.compile(
+    r"^https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([a-zA-Z0-9_-]{11})"
+)
+
+
+def _format_duration(seconds: int | float | None) -> str:
+    """Format seconds into human-readable duration."""
+    if not seconds:
+        return "unknown duration"
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+async def _extract_youtube(url: str, video_id: str) -> dict[str, Any]:
+    """Extract metadata and transcript from a YouTube video using yt-dlp.
+
+    Returns an MCP content response dict.
+    """
+    import asyncio
+
+    def _do_extract():
+        import yt_dlp
+
+        ydl_opts = {
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en"],
+            "socket_timeout": 30,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return yt_dlp.YoutubeDL.sanitize_info(info)
+
+    # Run in executor to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    info = await loop.run_in_executor(None, _do_extract)
+
+    # Build metadata header
+    title = info.get("title", "Untitled")
+    channel = info.get("channel", info.get("uploader", "Unknown"))
+    duration = _format_duration(info.get("duration"))
+    upload_date = info.get("upload_date", "")
+    if upload_date and len(upload_date) == 8:
+        upload_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+    view_count = info.get("view_count")
+    description = info.get("description", "")
+
+    lines = []
+    lines.append(f"# {title}")
+    lines.append(f"**{channel}** · {duration} · {upload_date}")
+    if view_count:
+        lines.append(f"{view_count:,} views")
+    lines.append("")
+
+    if description:
+        # Truncate long descriptions
+        if len(description) > 500:
+            description = description[:497] + "..."
+        lines.append(description)
+        lines.append("")
+
+    # Extract transcript from subtitles
+    transcript_text = None
+
+    # Try manual subs first, then auto-generated
+    for sub_key in ("subtitles", "automatic_captions"):
+        subs = info.get(sub_key, {})
+        if "en" in subs:
+            # Find json3 or srv1 format (structured, easy to parse)
+            for fmt in subs["en"]:
+                if fmt.get("ext") == "json3":
+                    # Fetch the subtitle file
+                    sub_url = fmt.get("url")
+                    if sub_url:
+                        try:
+                            async with httpx.AsyncClient(timeout=15.0) as client:
+                                resp = await client.get(sub_url)
+                                resp.raise_for_status()
+                                sub_data = resp.json()
+                                # json3 format: {"events": [{"segs": [{"utf8": "text"}], "tStartMs": ...}]}
+                                segments = []
+                                for event in sub_data.get("events", []):
+                                    for seg in event.get("segs", []):
+                                        text = seg.get("utf8", "").strip()
+                                        if text and text != "\n":
+                                            segments.append(text)
+                                if segments:
+                                    transcript_text = " ".join(segments)
+                        except Exception as e:
+                            logfire.warning(f"Failed to fetch subtitle file: {e}")
+                    break
+            if transcript_text:
+                break
+
+    if transcript_text:
+        lines.append("## Transcript")
+        lines.append("")
+        # Clean up: collapse multiple spaces, remove artifacts
+        transcript_text = re.sub(r"\s+", " ", transcript_text).strip()
+        # Truncate if massive (some videos are hours long)
+        if len(transcript_text) > 100_000:
+            transcript_text = transcript_text[:100_000] + f"\n\n[Transcript truncated at 100K characters]"
+        lines.append(transcript_text)
+    else:
+        lines.append("*No English transcript available for this video.*")
+
+    text = "\n".join(lines)
+    meta = f"\n---\n*YouTube video {video_id} via yt-dlp ({duration})*"
+
+    return {
+        "content": [
+            {"type": "text", "text": text},
+            {"type": "text", "text": meta},
+        ]
+    }
 
 
 async def _rewrite_github_url(url: str) -> tuple[str, str | None]:
@@ -354,6 +481,17 @@ def create_fetch_server():
         url, rewrite_note = await _rewrite_github_url(url)
         if rewrite_note:
             logfire.info(f"URL rewritten: {rewrite_note}", original=original_url, rewritten=url)
+
+        # YouTube: extract metadata + transcript via yt-dlp (no HTTP fetch needed)
+        yt_match = _YOUTUBE_RE.match(original_url)
+        if yt_match:
+            video_id = yt_match.group(1)
+            logfire.info("YouTube video detected", video_id=video_id, url=original_url)
+            try:
+                return await _extract_youtube(original_url, video_id)
+            except Exception as e:
+                logfire.warning("YouTube extraction failed, falling through to HTTP", error=str(e))
+                # Fall through to normal HTTP fetch if yt-dlp fails
 
         with logfire.span(
             "mcp.fetch",
