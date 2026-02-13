@@ -51,6 +51,7 @@ from .system_prompt import assemble
 from .tools.cortex import create_cortex_server
 from .tools.fetch import create_fetch_server
 from .tools.forge import create_forge_server
+from .tools.handoff import create_handoff_server
 from .system_prompt.soul import get_soul
 
 # The Alpha Plugin — agents, skills, and tools bundled in a sibling repo
@@ -193,6 +194,9 @@ class AlphaClient:
 
         # Compaction flag - set by PreCompact hook, cleared after re-orientation
         self._needs_reorientation: bool = False
+
+        # Hand-off: compact instructions set by the hand-off tool, consumed after stream
+        self._pending_compact: str | None = None
 
     # -------------------------------------------------------------------------
     # Session Discovery (static methods)
@@ -697,6 +701,180 @@ class AlphaClient:
                             session_id=self._current_session_id,
                         )
                     )
+
+                # ── Hand-off: fire /compact then wake up ──
+                if self._pending_compact and self._sdk_client:
+                    compact_instructions = self._pending_compact
+                    self._pending_compact = None
+
+                    with logfire.span("alpha.handoff") as handoff_span:
+                        # Step 1: Send /compact — consume silently
+                        compact_cmd = f"/compact {compact_instructions}"
+                        handoff_span.set_attribute("compact_instructions", compact_instructions[:200])
+                        logfire.info(f"Hand-off: sending {compact_cmd[:100]}")
+
+                        await self._sdk_client.query(
+                            compact_cmd,
+                            session_id=self._current_session_id or "new",
+                        )
+                        async for _ in self._sdk_client.receive_response():
+                            pass  # Compact response consumed silently
+
+                        logfire.info("Hand-off: compact complete, building wake-up")
+
+                        # Step 2: Build orientation for fresh context
+                        self._orientation_blocks = await self._build_orientation()
+                        wake_up_blocks: list[dict[str, Any]] = []
+
+                        if self._orientation_blocks:
+                            wake_up_blocks.extend(self._orientation_blocks)
+
+                        # Recall memories relevant to what we were doing
+                        wake_up_prompt = (
+                            "You've just been through a context compaction. "
+                            "Jeffery is here and listening. Orient yourself — "
+                            "read the summary above, check in, ask questions "
+                            "if anything's unclear."
+                        )
+                        memories = await recall(wake_up_prompt, self._current_session_id or "new")
+                        if memories:
+                            for mem in memories:
+                                wake_up_blocks.append({
+                                    "type": "text",
+                                    "text": _format_memory(mem),
+                                })
+                                if mem.get("image_path"):
+                                    image_data = load_thumbnail_base64(mem["image_path"])
+                                    if image_data:
+                                        wake_up_blocks.append({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": "image/jpeg",
+                                                "data": image_data,
+                                            },
+                                        })
+
+                        # Timestamp + wake-up message
+                        sent_at = pendulum.now("America/Los_Angeles").format("ddd MMM D YYYY, h:mm A")
+                        wake_up_blocks.append({"type": "text", "text": f"[Sent {sent_at}]"})
+                        wake_up_blocks.append({"type": "text", "text": wake_up_prompt})
+
+                        # Send wake-up via transport (same pattern as query())
+                        wake_up_message = {
+                            "type": "user",
+                            "message": {"role": "user", "content": wake_up_blocks},
+                            "session_id": self._current_session_id or "new",
+                        }
+                        await self._sdk_client._transport.write(
+                            json.dumps(wake_up_message) + "\n"
+                        )
+
+                        # ── gen_ai attributes for the wake-up turn ──
+                        # These make the hand-off visible in Logfire's Model Run panel:
+                        # system instructions, input messages, output messages, tokens, etc.
+                        handoff_span.set_attribute("gen_ai.system", "anthropic")
+                        handoff_span.set_attribute("gen_ai.operation.name", "chat")
+                        handoff_span.set_attribute("gen_ai.request.model", self.ALPHA_MODEL)
+                        handoff_span.set_attribute("client_name", self.client_name)
+                        if self._current_session_id:
+                            handoff_span.set_attribute("session_id", self._current_session_id)
+                            handoff_span.set_attribute("gen_ai.conversation.id", self._current_session_id)
+
+                        # System instructions = the soul (same as alpha.turn)
+                        if self._system_prompt:
+                            handoff_span.set_attribute(
+                                "gen_ai.system_instructions",
+                                json.dumps([{"type": "text", "content": self._system_prompt}])
+                            )
+
+                        # Input messages = the wake-up prompt with all orientation blocks
+                        wake_up_input_parts = []
+                        for block in wake_up_blocks:
+                            if block.get("type") == "text":
+                                wake_up_input_parts.append({
+                                    "type": "text",
+                                    "content": block.get("text", "")
+                                })
+                        handoff_span.set_attribute(
+                            "gen_ai.input.messages",
+                            json.dumps([{"role": "user", "parts": wake_up_input_parts}])
+                        )
+
+                        # Step 3: Yield wake-up response to consumer, capturing output
+                        logfire.info("Hand-off: streaming wake-up response")
+                        wake_up_output_parts: list[dict] = []
+                        async for message in self._sdk_client.receive_response():
+                            # Capture assistant text for gen_ai.output.messages
+                            if isinstance(message, AssistantMessage):
+                                for block in message.content:
+                                    if isinstance(block, TextBlock):
+                                        wake_up_output_parts.append({
+                                            "type": "text",
+                                            "content": block.text
+                                        })
+                                    elif isinstance(block, ToolUseBlock):
+                                        wake_up_output_parts.append({
+                                            "type": "tool_call",
+                                            "id": block.id,
+                                            "name": block.name,
+                                            "arguments": block.input,
+                                        })
+                                # Capture finish reason
+                                if hasattr(message, 'stop_reason') and message.stop_reason:
+                                    handoff_span.set_attribute(
+                                        "gen_ai.response.finish_reasons",
+                                        json.dumps([message.stop_reason])
+                                    )
+
+                            # Capture token usage and cost from ResultMessage
+                            if isinstance(message, ResultMessage):
+                                if message.session_id:
+                                    self._current_session_id = message.session_id
+                                    handoff_span.set_attribute("session_id", message.session_id)
+                                    handoff_span.set_attribute("gen_ai.conversation.id", message.session_id)
+                                if message.duration_ms:
+                                    handoff_span.set_attribute("duration_ms", message.duration_ms)
+                                if message.num_turns:
+                                    handoff_span.set_attribute("inference_count", message.num_turns)
+                                if message.total_cost_usd:
+                                    handoff_span.set_attribute("cost_usd", message.total_cost_usd)
+                                if message.usage:
+                                    input_tokens = message.usage.get("input_tokens", 0)
+                                    output_tokens = message.usage.get("output_tokens", 0)
+                                    if input_tokens:
+                                        handoff_span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+                                    if output_tokens:
+                                        handoff_span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+                                    cache_creation = message.usage.get("cache_creation_input_tokens", 0)
+                                    cache_read = message.usage.get("cache_read_input_tokens", 0)
+                                    if cache_creation:
+                                        handoff_span.set_attribute("gen_ai.usage.cache_creation.input_tokens", cache_creation)
+                                    if cache_read:
+                                        handoff_span.set_attribute("gen_ai.usage.cache_read.input_tokens", cache_read)
+                                if hasattr(message, 'model') and message.model:
+                                    handoff_span.set_attribute("gen_ai.response.model", message.model)
+
+                            yield message
+
+                        # Set output messages now that we've captured everything
+                        if wake_up_output_parts:
+                            handoff_span.set_attribute(
+                                "gen_ai.output.messages",
+                                json.dumps([{"role": "assistant", "parts": wake_up_output_parts}])
+                            )
+
+                        # Calculate response length for consistency with alpha.turn
+                        wake_up_text = "".join(
+                            p["content"] for p in wake_up_output_parts
+                            if p.get("type") == "text"
+                        )
+                        handoff_span.set_attribute("response_length", len(wake_up_text))
+
+                        self._needs_reorientation = False  # We just oriented
+                        handoff_span.set_attribute("handoff_complete", True)
+                        logfire.info("Hand-off complete")
+
         finally:
             # End the root turn span
             if self._turn_span:
@@ -759,6 +937,15 @@ class AlphaClient:
         self._on_token_count = callback
         if self._compact_proxy:
             self._compact_proxy._on_token_count = callback
+
+    def request_compact(self, instructions: str) -> None:
+        """Flag a compact to fire after the current response stream finishes.
+
+        Called by the hand-off MCP tool. The instructions get passed as
+        the /compact argument and flow through to the summarizer.
+        """
+        self._pending_compact = instructions
+        logfire.info(f"Hand-off requested: {instructions[:100]}")
 
     def clear_memorables(self) -> int:
         """Clear pending memorables and return how many were cleared.
@@ -913,6 +1100,9 @@ class AlphaClient:
             ),
             "fetch": create_fetch_server(),
             "forge": create_forge_server(),
+            "handoff": create_handoff_server(
+                on_handoff=self.request_compact,
+            ),
         }
         # Consumer-provided servers override internal ones with the same name
         merged_servers = {**internal_servers, **self.mcp_servers}
@@ -924,6 +1114,7 @@ class AlphaClient:
             "mcp__cortex__recent",
             "mcp__fetch__fetch",
             "mcp__forge__imagine",
+            "mcp__handoff__handoff",
         ]
         allowed = list(self.allowed_tools or [])
         for tool_name in internal_tool_names:
