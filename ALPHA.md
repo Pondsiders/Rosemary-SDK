@@ -41,7 +41,15 @@ Why have each client implement this separately? Why have services on alpha-pi wh
 - **Postgres** — memories, archival, capsule summaries
 - **Redis** — caching (weather, calendar, todos, memorables buffer)
 - **Pulse** — still schedules Routines
-- **OLMo on Primer** — still does recall query extraction and memorables suggestion
+- **Gemma 3 12B on Primer** — recall query extraction and memorables suggestion
+
+## Deployment Model
+
+**Duckpond** installs the SDK as an editable local package (`pip install -e`). It picks up changes immediately — no restart needed for Python changes, restart Duckpond for structural changes. This is the live tinkering environment.
+
+**Routines, Solitude, and other consumers** pin to `alpha_sdk @ git+https://github.com/Pondsiders/Alpha-SDK@main`. They only see code that has been merged to `main` and pushed to GitHub. This is deliberate safety: tinkering on the SDK during the day cannot break Solitude's nighttime breathing.
+
+**The workflow:** tinker on the `tinkering` branch → test live via Duckpond → when happy, merge to `main` and push → other consumers get the changes on next install/restart.
 
 ## Architecture
 
@@ -288,4 +296,4 @@ AlphaClient's `list_sessions()` and `get_session_path()` encapsulate all of this
 
 ## Status
 
-**Building. SDK integration in progress.**
+**In production.** Duckpond, Routines, and Solitude all run on alpha_sdk. The tinkering never stops, but the foundation is solid.

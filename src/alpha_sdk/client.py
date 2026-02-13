@@ -198,6 +198,10 @@ class AlphaClient:
         # Hand-off: compact instructions set by the hand-off tool, consumed after stream
         self._pending_compact: str | None = None
 
+        # Approach lights: escalating context warnings at 60% and 70%
+        # Tracks the highest tier warned so we don't repeat the same warning
+        self._approach_warned: int = 0  # 0=none, 1=amber(60%), 2=red(70%)
+
     # -------------------------------------------------------------------------
     # Session Discovery (static methods)
     # -------------------------------------------------------------------------
@@ -427,6 +431,12 @@ class AlphaClient:
                 # Process content blocks — resize inline images for safety & token efficiency
                 processed_prompt = self._process_inline_images(prompt)
                 content_blocks.extend(processed_prompt)
+
+            # Approach lights: context warnings at 60% and 70%
+            approach_light = self._get_approach_light()
+            if approach_light:
+                content_blocks.append({"type": "text", "text": approach_light})
+                span.set_attribute("approach_light", True)
 
             span.set_attribute("content_blocks", len(content_blocks))
 
@@ -933,6 +943,57 @@ class AlphaClient:
             return self._compact_proxy.context_window
         return CompactProxy.DEFAULT_CONTEXT_WINDOW
 
+    def _get_approach_light(self) -> str | None:
+        """Check context usage and return an approach light warning if threshold crossed.
+
+        Two tiers:
+        - Amber (60%): gentle heads-up to start thinking about pausing
+        - Red (70%): stern warning to wrap up or hand off
+
+        Only fires once per tier (resets after compaction).
+        Returns the warning text, or None if no warning needed.
+        """
+        if not self._compact_proxy:
+            return None
+
+        token_count = self._compact_proxy.token_count
+        context_window = self._compact_proxy.context_window
+        if context_window == 0 or token_count == 0:
+            return None
+
+        pct = token_count / context_window
+
+        if pct >= 0.70 and self._approach_warned < 2:
+            self._approach_warned = 2
+            logfire.warn(
+                "Approach light: RED ({pct:.0%})",
+                pct=pct,
+            )
+            return (
+                f"## ⚠️ Context Warning — RED ({pct:.0%})\n\n"
+                f"You're at {token_count:,} of {context_window:,} tokens. "
+                "This is not a drill. Wrap up what you're doing and either hand off "
+                "(use the hand-off tool with instructions for next-you) or let Jeffery know "
+                "it's time to compact. Starting new topics now is risky — you may lose context "
+                "before you can finish them."
+            )
+
+        if pct >= 0.60 and self._approach_warned < 1:
+            self._approach_warned = 1
+            logfire.info(
+                "Approach light: AMBER ({pct:.0%})",
+                pct=pct,
+            )
+            return (
+                f"## 🟡 Context Warning — AMBER ({pct:.0%})\n\n"
+                f"You're at {token_count:,} of {context_window:,} tokens. "
+                "Start thinking about a good place to pause. You don't need to stop immediately, "
+                "but keep an eye on where the conversation is heading. If there's something important "
+                "to store or hand off, now's a good time to start thinking about it."
+            )
+
+        return None
+
     @property
     def usage_7d(self) -> float | None:
         """Get the 7-day (weekly) usage as a float 0.0-1.0, or None if not yet known.
@@ -1088,6 +1149,7 @@ class AlphaClient:
         """Hook called before compaction - flag that we need to re-orient and reset token count."""
         logfire.info("Compaction triggered, will re-orient on next turn and reset token count")
         self._needs_reorientation = True
+        self._approach_warned = 0  # Reset approach lights after compaction
 
         # Reset token count since compaction clears most of the context
         if self._compact_proxy:
