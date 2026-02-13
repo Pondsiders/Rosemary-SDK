@@ -1,6 +1,6 @@
 ---
 autoload: when
-when: "working on or discussing any of these: alpha_sdk, alpha sdk, AlphaClient, weave, system prompt assembly, soul injection, proxy interception, memories recall, memories suggest"
+when: "working on or discussing any of these: alpha_sdk, alpha sdk, AlphaClient, compact proxy, system prompt assembly, soul injection, token counting, memories recall, memories suggest"
 ---
 
 # alpha_sdk — The Grand Unified Alpha Library
@@ -29,7 +29,7 @@ Why have each client implement this separately? Why have services on alpha-pi wh
 | Before | After |
 |--------|-------|
 | Deliverator (service) | Gone—no headers to promote |
-| The Loom (service) | `weave.py` in the library |
+| The Loom (service) | `system_prompt/` + `compact_proxy.py` in the library |
 | Argonath (service) | `observability.py` in the library |
 | Duckpond's `memories/` | `alpha_sdk/memories/` |
 | Duckpond's context building | `alpha_sdk/system_prompt/` |
@@ -57,8 +57,10 @@ Why have each client implement this separately? Why have services on alpha-pi wh
 alpha_sdk/
 ├── __init__.py              # Exports AlphaClient
 ├── client.py                # AlphaClient - the main wrapper
-├── proxy.py                 # Minimal localhost proxy for request interception
-├── weave.py                 # Orchestrates transformation
+├── compact_proxy.py         # Localhost proxy: compact rewriting + token counting
+├── archive.py               # Conversation archiving to Postgres
+├── sessions.py              # Session discovery and management
+├── observability.py         # Logfire setup, span creation
 ├── system_prompt/
 │   ├── __init__.py          # assemble() - builds the full system prompt
 │   ├── soul.py              # The soul doc (from file)
@@ -69,10 +71,18 @@ alpha_sdk/
 │   └── todos.py             # Todos (from Redis)
 ├── memories/
 │   ├── __init__.py
-│   ├── cortex.py            # store, search, recent (Postgres operations)
-│   ├── recall.py            # Smart recall (embedding + OLMo query extraction)
-│   └── suggest.py           # OLMo memorables extraction
-└── observability.py         # Logfire setup, span creation
+│   ├── db.py                # Direct Postgres operations (hybrid search)
+│   ├── cortex.py            # store, search, recent (high-level API)
+│   ├── embeddings.py        # Embedding generation via Forge
+│   ├── images.py            # Mind's Eye (image storage)
+│   ├── recall.py            # Smart recall (embedding + Gemma query extraction)
+│   └── suggest.py           # Gemma memorables extraction
+└── tools/
+    ├── __init__.py
+    ├── cortex.py            # Cortex MCP server (store/search/recent)
+    ├── fetch.py             # Fetch MCP server (web/image/RSS)
+    ├── forge.py             # Forge MCP server (imagine)
+    └── handoff.py           # Hand-off MCP server
 ```
 
 ## The Client API
@@ -156,14 +166,15 @@ This means Duckpond can be a dumb pass-through: whatever session_id the frontend
 
 ### The Proxy Pattern
 
-Claude Agent SDK sends requests to `ANTHROPIC_BASE_URL`. We set that to `http://localhost:{random_port}` and run a minimal HTTP server that:
+Claude Agent SDK sends requests to `ANTHROPIC_BASE_URL`. We set that to `http://localhost:{random_port}` and run a minimal HTTP server (`compact_proxy.py`) that:
 
 1. Receives the request from the SDK
-2. Calls `weave()` to transform it (replace system prompt, strip envelope)
-3. Forwards to `https://api.anthropic.com`
-4. Streams the response back
+2. If it's a compaction request, rewrites the prompts (Alpha's identity + custom compact instructions)
+3. Echoes the request to `/v1/messages/count_tokens` (fire-and-forget token counting)
+4. Forwards to `https://api.anthropic.com`
+5. Streams the response back
 
-This happens inside `AlphaClient.__aenter__()`. The proxy starts, the SDK is configured, everything is automatic.
+The system prompt is assembled at client creation time and passed directly to the SDK — no proxy interception needed for normal requests.
 
 ### System Prompt Assembly
 

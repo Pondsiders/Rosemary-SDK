@@ -368,6 +368,9 @@ class AlphaClient:
                 # Re-build orientation in case it's stale (post-compact)
                 if self._needs_reorientation:
                     self._orientation_blocks = await self._build_orientation()
+                    # Reset token count — compaction just shrunk the context
+                    if self._compact_proxy:
+                        self._compact_proxy.reset_token_count()
 
                 # Add orientation blocks
                 if self._orientation_blocks:
@@ -1146,15 +1149,10 @@ class AlphaClient:
         tool_use_id: str | None,
         context: HookContext,
     ) -> dict[str, Any]:
-        """Hook called before compaction - flag that we need to re-orient and reset token count."""
-        logfire.info("Compaction triggered, will re-orient on next turn and reset token count")
+        """Hook called before compaction - flag that we need to re-orient on next turn."""
+        logfire.info("Compaction triggered, will re-orient on next turn")
         self._needs_reorientation = True
         self._approach_warned = 0  # Reset approach lights after compaction
-
-        # Reset token count since compaction clears most of the context
-        if self._compact_proxy:
-            self._compact_proxy.reset_token_count()
-
         return {"continue_": True}
 
     async def _ensure_session(self, session_id: str | None) -> None:

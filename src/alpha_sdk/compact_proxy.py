@@ -15,9 +15,10 @@ We just need to catch:
 
 Token counting (Feb 2026):
 - Echoes each request to Anthropic's /v1/messages/count_tokens endpoint
-- Tracks max(token_count, new_count) so warmup noise is filtered out
+- Tracks max(token_count, new_count) so warmup and tool-use noise is filtered out
 - Fires a callback when count increases
-- Resets to 0 after compaction
+- Reset is triggered by AlphaClient.query() on the first turn after compaction
+  (not here — the proxy doesn't know when compaction is "done")
 
 Debug mode:
 Set ALPHA_SDK_CAPTURE_REQUESTS=1 to dump every request to tests/captures/
