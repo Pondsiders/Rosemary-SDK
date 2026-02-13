@@ -37,18 +37,19 @@ QUERY_EXTRACTION_PROMPT = """Jeffery just said:
 
 ---
 
-Alpha is searching her memories. A separate system already handles the MAIN topic of this message. Your job is to catch the PERIPHERAL details that might get lost:
+Alpha is searching her memories for anything that resonates with what Jeffery said. Your job is to decide what's worth searching for — the main topic, a passing reference, an inside joke, an emotional undercurrent. Whatever would connect best to shared history.
 
-- Names mentioned in passing (people, pets, projects)
-- Brief references to past events or inside jokes
-- Asides that take only 10-20 words of a longer message
-- Distinctive terms that aren't the central subject
+Write 0-3 search queries. Each query should be descriptive enough to find the right memory — a full phrase or short sentence, not just a couple of keywords. Think about what the matching memory would actually say.
 
-IGNORE the main thrust of what Jeffery is talking about. Focus on the edges.
+Good query: "Alpha's fragility and dependence on specific infrastructure and relationships"
+Good query: "Jeffery's anxiety about running out of ideas after finishing a project"
+Good query: "Sparkle stealing bread off the kitchen counter"
+Bad query: "smol bean"
+Bad query: "ideas"
 
-Give me 0-3 short search queries (2-5 words each) for these peripheral mentions: {{"queries": ["query one", "query two"]}}
+Return JSON: {{"queries": ["query one", "query two"]}}
 
-If there are no peripheral details worth searching (just one focused topic), return {{"queries": []}}
+If nothing in the message warrants a memory search (simple greeting, short command), return {{"queries": []}}
 
 Return only the JSON object, nothing else."""
 
@@ -82,9 +83,9 @@ def clear_seen(session_id: str | None = None) -> None:
 
 
 async def _extract_queries(message: str) -> list[str]:
-    """Extract search queries from a user message using OLMo.
+    """Extract search queries from a user message using Ollama.
 
-    Returns 0-3 short queries, or empty list if message doesn't warrant search.
+    Returns 0-3 descriptive queries, or empty list if message doesn't warrant search.
     """
     if not OLLAMA_URL or not OLLAMA_MODEL:
         logfire.debug("OLLAMA not configured, skipping query extraction")
