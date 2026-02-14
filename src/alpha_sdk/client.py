@@ -1229,6 +1229,8 @@ class AlphaClient:
             "hooks": hooks,
             # The Alpha Plugin — agents, skills, and MCP servers in one bundle
             "plugins": [{"type": "local", "path": _ALPHA_PLUGIN_DIR}],
+            # Extended thinking — the budget is a ceiling, not a mandate
+            "max_thinking_tokens": 10_000,
         }
         options = ClaudeAgentOptions(**options_kwargs)
 
