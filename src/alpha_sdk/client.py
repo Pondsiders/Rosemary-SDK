@@ -909,6 +909,12 @@ class AlphaClient:
                         handoff_span.set_attribute("response_length", len(wake_up_text))
 
                         self._needs_reorientation = False  # We just oriented
+                        # Reset token count — handoff just compacted the context
+                        # (Same reset that query() does for auto-compaction,
+                        # but handoff clears _needs_reorientation itself, so
+                        # query() would skip its reset on the next turn.)
+                        if self._compact_proxy:
+                            self._compact_proxy.reset_token_count()
                         handoff_span.set_attribute("handoff_complete", True)
                         logfire.info("Hand-off complete")
 
@@ -1229,8 +1235,8 @@ class AlphaClient:
             "hooks": hooks,
             # The Alpha Plugin — agents, skills, and MCP servers in one bundle
             "plugins": [{"type": "local", "path": _ALPHA_PLUGIN_DIR}],
-            # Extended thinking — the budget is a ceiling, not a mandate
-            "max_thinking_tokens": 10_000,
+            # Extended thinking — adaptive: think when it helps, don't when it doesn't
+            "thinking": {"type": "adaptive"},
         }
         options = ClaudeAgentOptions(**options_kwargs)
 
