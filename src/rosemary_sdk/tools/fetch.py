@@ -1,6 +1,6 @@
-"""Fetch tool — universal URL reader for alpha_sdk.
+"""Fetch tool — universal URL reader for rosemary_sdk.
 
-Fetches any URL and returns content in a format Alpha can work with:
+Fetches any URL and returns content in a format the AI can work with:
 - text/markdown responses pass through directly
 - text/html responses are converted to markdown via html2text
 - image/* responses are returned as base64 image content blocks
@@ -25,7 +25,7 @@ Environment:
     CLOUDFLARE_TOKEN      - For Browser Rendering (optional)
 
 Usage:
-    from alpha_sdk.tools.fetch import create_fetch_server
+    from rosemary_sdk.tools.fetch import create_fetch_server
 
     mcp_servers = {
         "fetch": create_fetch_server()

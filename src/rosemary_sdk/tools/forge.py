@@ -1,13 +1,13 @@
-"""Forge imagination tools — native MCP server for alpha_sdk.
+"""Forge imagination tools — native MCP server for rosemary_sdk.
 
 Calls Forge's /imagine endpoint over HTTP to generate images on the GPU.
-Returns images as base64 content blocks so Alpha sees what she imagined.
+Returns images as base64 content blocks so the AI sees what it imagined.
 
 Forge URL comes from FORGE_URL env var (default: http://primer:8200).
 If Forge is unreachable, the tool fails gracefully with an error message.
 
 Usage:
-    from alpha_sdk.tools.forge import create_forge_server
+    from rosemary_sdk.tools.forge import create_forge_server
 
     mcp_servers = {
         "forge": create_forge_server()

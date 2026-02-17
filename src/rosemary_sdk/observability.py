@@ -1,7 +1,7 @@
 """Observability setup - Logfire configuration.
 
 Centralizes logging and tracing configuration so all
-alpha_sdk consumers get consistent observability.
+rosemary_sdk consumers get consistent observability.
 
 We use logfire.info/warn/error/debug directly instead of
 Python's logging module. This ensures all logs are properly
@@ -11,7 +11,7 @@ associated with the current span context.
 import logfire
 
 
-def configure(service_name: str = "alpha_sdk", debug: bool = False) -> None:
+def configure(service_name: str = "rosemary_sdk", debug: bool = False) -> None:
     """Configure Logfire for observability.
 
     Args:

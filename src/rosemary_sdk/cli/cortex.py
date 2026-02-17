@@ -1,4 +1,4 @@
-"""Cortex CLI - Command line interface for Alpha's memory system.
+"""Cortex CLI - Command line interface for Rosemary's memory system.
 
 Direct Postgres access—no HTTP layer, no Cortex service dependency.
 This is the sysadmin/debugging tool for Jeffery.
@@ -22,7 +22,7 @@ from rich.console import Console
 # We'll import the async functions and run them
 from ..memories import store, search, recent, get, forget, health
 
-app = typer.Typer(help="Cortex - Alpha's semantic memory CLI")
+app = typer.Typer(help="Cortex - Rosemary's semantic memory CLI")
 console = Console()
 
 

@@ -1,6 +1,6 @@
-"""Hand-off tool — Alpha's bedtime routine button.
+"""Hand-off tool — context transition tool.
 
-Alpha calls this when she's ready to transition her context. The tool
+Called when ready to transition context. The tool
 sets a flag; after the current turn's response stream finishes, the
 client automatically sends /compact with her instructions, then wakes
 her up in a fresh context with orientation and memories.
@@ -26,7 +26,7 @@ def create_handoff_server(
 
     Args:
         on_handoff: Callback that receives compact instructions.
-                    Should call AlphaClient.request_compact().
+                    Should call RosemaryClient.request_compact().
         store_memory: Async function to store a memory in Cortex.
                       Should call cortex.store().
 

@@ -1,6 +1,6 @@
 """Memory operations - Cortex integration and smart recall.
 
-Cortex is now fully absorbed into alpha_sdk:
+Cortex is now fully absorbed into rosemary_sdk:
 - Direct Postgres access via asyncpg (no HTTP layer)
 - Direct Ollama embeddings (nomic-embed-text with proper task prefixes)
 - store/search/recent are the foundational operations

@@ -1,4 +1,4 @@
-"""MCP tools for alpha_sdk."""
+"""MCP tools for rosemary_sdk."""
 
 from .cortex import create_cortex_server
 from .fetch import create_fetch_server

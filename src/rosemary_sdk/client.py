@@ -1,4 +1,4 @@
-"""AlphaClient - the main interface to Alpha.
+"""RosemaryClient - the main interface to Rosemary.
 
 Architecture:
 - System prompt is assembled once at connect() and passed to SDK
@@ -54,8 +54,8 @@ from .tools.forge import create_forge_server
 from .tools.handoff import create_handoff_server
 from .system_prompt.soul import get_soul
 
-# The Alpha Plugin — agents, skills, and tools bundled in a sibling repo
-_ALPHA_PLUGIN_DIR = str(Path(__file__).parent.parent.parent.parent / "alpha_plugin")
+# The Rosemary Plugin — agents, skills, and tools bundled in a sibling repo
+_ROSEMARY_PLUGIN_DIR = str(Path(__file__).parent.parent.parent.parent / "Rosemary-Plugin")
 
 # Store original ANTHROPIC_BASE_URL so we can restore it
 _ORIGINAL_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")
@@ -117,7 +117,7 @@ def _format_memory(memory: dict) -> str:
     return f"## Memory #{mem_id} ({relative_time}{score_str})\n{content}"
 
 
-class AlphaClient:
+class RosemaryClient:
     """Long-lived client that wraps Claude Agent SDK.
 
     Proxyless architecture:
@@ -127,7 +127,7 @@ class AlphaClient:
     - Memorables = per-turn nudge, in user content
 
     Usage:
-        async with AlphaClient(cwd="/Pondside") as client:
+        async with RosemaryClient(cwd="/Pondside") as client:
             await client.query("Hello!", session_id=None)  # New session
             async for event in client.stream():
                 print(event)
@@ -137,14 +137,14 @@ class AlphaClient:
                 print(event)
     """
 
-    # The model that IS Alpha. Pinned at the SDK level, not configurable per-client.
-    # When we upgrade Alpha to a new model, we bump alpha_sdk version.
-    ALPHA_MODEL = "claude-opus-4-6"
+    # The model that IS Rosemary. Pinned at the SDK level, not configurable per-client.
+    # When we upgrade Rosemary to a new model, we bump rosemary_sdk version.
+    ROSEMARY_MODEL = "claude-opus-4-6"
 
     def __init__(
         self,
         cwd: str = "/Pondside",
-        client_name: str = "alpha_sdk",
+        client_name: str = "rosemary_sdk",
         hostname: str | None = None,
         allowed_tools: list[str] | None = None,
         mcp_servers: dict | None = None,
@@ -153,7 +153,7 @@ class AlphaClient:
         permission_mode: PermissionMode = "default",
         on_token_count: "TokenCountCallback | None" = None,
     ):
-        """Initialize the Alpha client.
+        """Initialize the Rosemary client.
 
         Args:
             cwd: Working directory for the agent
@@ -229,7 +229,7 @@ class AlphaClient:
         Args:
             session_id: Session to resume, or None for new session
         """
-        with logfire.span("alpha.connect") as span:
+        with logfire.span("rosemary.connect") as span:
             # Start compact proxy (intercepts compact prompts + counts tokens)
             self._compact_proxy = CompactProxy(on_token_count=self._on_token_count)
             await self._compact_proxy.start()
@@ -239,7 +239,7 @@ class AlphaClient:
             logfire.info(f"Proxy started, ANTHROPIC_BASE_URL={self._compact_proxy.base_url}")
 
             # Build the system prompt - just the soul
-            self._system_prompt = f"# Alpha\n\n{get_soul()}"
+            self._system_prompt = f"# Rosemary\n\n{get_soul()}"
             span.set_attribute("system_prompt_length", len(self._system_prompt))
 
             # Pre-build orientation blocks (will be injected on first turn)
@@ -249,7 +249,7 @@ class AlphaClient:
             # Create SDK client with system prompt
             await self._create_sdk_client(session_id)
 
-            logfire.info(f"AlphaClient connected (soul: {len(self._system_prompt)} chars, proxy: {self._compact_proxy.port})")
+            logfire.info(f"RosemaryClient connected (soul: {len(self._system_prompt)} chars, proxy: {self._compact_proxy.port})")
 
     async def disconnect(self) -> None:
         """Disconnect and clean up resources."""
@@ -276,9 +276,9 @@ class AlphaClient:
                 del os.environ["ANTHROPIC_BASE_URL"]
 
         self._current_session_id = None
-        logfire.debug("AlphaClient disconnected")
+        logfire.debug("RosemaryClient disconnected")
 
-    async def __aenter__(self) -> "AlphaClient":
+    async def __aenter__(self) -> "RosemaryClient":
         """Context manager entry - connects the client."""
         await self.connect()
         return self
@@ -316,7 +316,7 @@ class AlphaClient:
 
         # Start the root turn span with prompt preview in the name
         self._turn_span = logfire.span(
-            "alpha.turn: {prompt_preview}",
+            "rosemary.turn: {prompt_preview}",
             prompt_preview=prompt_preview,
             session_id=session_id or "new",
             client_name=self.client_name,
@@ -326,7 +326,7 @@ class AlphaClient:
         # Set gen_ai attributes for Model Run card (progressively enhanced)
         self._turn_span.set_attribute("gen_ai.system", "anthropic")
         self._turn_span.set_attribute("gen_ai.operation.name", "chat")
-        self._turn_span.set_attribute("gen_ai.request.model", self.ALPHA_MODEL)
+        self._turn_span.set_attribute("gen_ai.request.model", self.ROSEMARY_MODEL)
         if session_id:
             self._turn_span.set_attribute("gen_ai.conversation.id", session_id)
 
@@ -348,7 +348,7 @@ class AlphaClient:
         if self._compact_proxy:
             self._compact_proxy.set_trace_context(logfire.get_context())
 
-        with logfire.span("alpha.query") as span:
+        with logfire.span("rosemary.query") as span:
             # Handle session switching
             await self._ensure_session(session_id)
 
@@ -383,7 +383,7 @@ class AlphaClient:
             # Check for memorables from previous turn (the nudge)
             if self._pending_memorables:
                 nudge = "## Intro speaks\n\n"
-                nudge += "Alpha, consider storing these from the previous turn:\n"
+                nudge += "Rosemary, consider storing these from the previous turn:\n"
                 nudge += "\n".join(f"- {m}" for m in self._pending_memorables)
                 content_blocks.append({"type": "text", "text": nudge})
                 span.set_attribute("memorables_nudged", len(self._pending_memorables))
@@ -470,9 +470,9 @@ class AlphaClient:
         """Stream responses from the agent.
 
         Creates one span per API inference call:
-        - alpha.inference.0: user prompt → assistant (possibly with tool calls)
-        - alpha.inference.1: tool_call + tool_result → assistant continues
-        - alpha.inference.N: tool_call + tool_result → final response
+        - rosemary.inference.0: user prompt → assistant (possibly with tool calls)
+        - rosemary.inference.1: tool_call + tool_result → assistant continues
+        - rosemary.inference.N: tool_call + tool_result → final response
 
         Each inference span has its own gen_ai.input.messages and gen_ai.output.messages.
         Tool calls are paired with their results in the input for visual clarity in Logfire.
@@ -484,7 +484,7 @@ class AlphaClient:
             raise RuntimeError("Client not connected. Call connect() first.")
 
         try:
-            with logfire.span("alpha.stream") as stream_span:
+            with logfire.span("rosemary.stream") as stream_span:
                 assistant_text_parts: list[str] = []
                 message_count = 0
                 inference_count = 0
@@ -505,7 +505,7 @@ class AlphaClient:
                 def _start_inference_span(inference_num: int, initial_input: list[dict]) -> logfire.LogfireSpan:
                     """Start a new inference span with initial input."""
                     span = logfire.span(
-                        "alpha.inference.{n}",
+                        "rosemary.inference.{n}",
                         n=inference_num,
                     )
                     span.__enter__()
@@ -720,7 +720,7 @@ class AlphaClient:
                     compact_instructions = self._pending_compact
                     self._pending_compact = None
 
-                    with logfire.span("alpha.handoff") as handoff_span:
+                    with logfire.span("rosemary.handoff") as handoff_span:
                         # Step 1: Send /compact — consume silently
                         compact_cmd = f"/compact {compact_instructions}"
                         handoff_span.set_attribute("compact_instructions", compact_instructions[:200])
@@ -812,13 +812,13 @@ class AlphaClient:
                             handoff_span.set_attribute("compact_summary_length", len(compact_summary))
                         handoff_span.set_attribute("gen_ai.system", "anthropic")
                         handoff_span.set_attribute("gen_ai.operation.name", "chat")
-                        handoff_span.set_attribute("gen_ai.request.model", self.ALPHA_MODEL)
+                        handoff_span.set_attribute("gen_ai.request.model", self.ROSEMARY_MODEL)
                         handoff_span.set_attribute("client_name", self.client_name)
                         if self._current_session_id:
                             handoff_span.set_attribute("session_id", self._current_session_id)
                             handoff_span.set_attribute("gen_ai.conversation.id", self._current_session_id)
 
-                        # System instructions = the soul (same as alpha.turn)
+                        # System instructions = the soul (same as rosemary.turn)
                         if self._system_prompt:
                             handoff_span.set_attribute(
                                 "gen_ai.system_instructions",
@@ -1069,9 +1069,9 @@ class AlphaClient:
 
         For each image block:
         1. Resize to 768px long edge JPEG (safety valve + token efficiency)
-        2. Save thumbnail to Alpha-Home/images/thumbnails/
+        2. Save thumbnail
         3. Replace original base64 with thumbnail base64
-        4. Add a text block with the thumbnail path (so Alpha can attach it to memories)
+        4. Add a text block with the thumbnail path (so Rosemary can attach it to memories)
 
         This prevents Request Too Large errors from retina screenshots
         and makes every pasted image available for `cortex store --image`.
@@ -1099,7 +1099,7 @@ class AlphaClient:
                                 "data": new_base64,
                             },
                         })
-                        # Add path hint so Alpha can use it with cortex store
+                        # Add path hint so Rosemary can use it with cortex store
                         processed.append({
                             "type": "text",
                             "text": f"[Image saved: {thumb_path}]",
@@ -1127,7 +1127,7 @@ class AlphaClient:
         - Letter from last night
         - Today so far
         - Here (client, machine, weather)
-        - ALPHA.md context files
+        - context files
         - Events
         - Todos
         """
@@ -1139,11 +1139,11 @@ class AlphaClient:
             )
 
             # Skip the first block (which is the soul)
-            # The soul starts with "# Alpha\n\n"
+            # The soul starts with "# Rosemary\n\n"
             orientation_blocks = []
             for block in all_blocks:
                 text = block.get("text", "")
-                if not text.startswith("# Alpha\n\n"):
+                if not text.startswith("# Rosemary\n\n"):
                     orientation_blocks.append(block)
 
             span.set_attribute("orientation_blocks", len(orientation_blocks))
@@ -1226,15 +1226,15 @@ class AlphaClient:
         options_kwargs = {
             "cwd": self.cwd,
             "system_prompt": self._system_prompt,  # Just the soul!
-            "model": self.ALPHA_MODEL,  # Alpha IS this model
+            "model": self.ROSEMARY_MODEL,  # Rosemary IS this model
             "allowed_tools": allowed,
             "mcp_servers": merged_servers,
             "include_partial_messages": self.include_partial_messages,
             "resume": session_id,
             "permission_mode": self.permission_mode,
             "hooks": hooks,
-            # The Alpha Plugin — agents, skills, and MCP servers in one bundle
-            "plugins": [{"type": "local", "path": _ALPHA_PLUGIN_DIR}],
+            # The Rosemary Plugin — agents, skills, and MCP servers in one bundle
+            "plugins": [{"type": "local", "path": _ROSEMARY_PLUGIN_DIR}],
             # Extended thinking — adaptive: think when it helps, don't when it doesn't
             "thinking": {"type": "adaptive"},
         }

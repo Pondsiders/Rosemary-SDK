@@ -1,6 +1,6 @@
-"""Dynamic context loading from ALPHA.md files.
+"""Dynamic context loading from ROSEMARY.md files.
 
-Walks /Pondside looking for ALPHA.md files with YAML frontmatter.
+Walks the context root looking for ROSEMARY.md files with YAML frontmatter.
 The 'autoload' key controls what gets injected:
 
 - autoload: all   -> Full content becomes a system block
@@ -13,12 +13,13 @@ from pathlib import Path
 import frontmatter
 import logfire
 
+# TODO: Update CONTEXT_ROOT to Rosemary's home directory
 CONTEXT_ROOT = Path("/Pondside")
-CONTEXT_FILE_NAME = "ALPHA.md"
+CONTEXT_FILE_NAME = "ROSEMARY.md"
 
 
 def find_context_files(root: Path = CONTEXT_ROOT) -> list[Path]:
-    """Walk directory tree finding ALPHA.md files."""
+    """Walk directory tree finding ROSEMARY.md files."""
     if not root.exists():
         logfire.warning(f"Context root does not exist: {root}")
         return []
@@ -32,7 +33,7 @@ def find_context_files(root: Path = CONTEXT_ROOT) -> list[Path]:
 
 
 def load_context() -> tuple[list[dict], list[str]]:
-    """Load ALPHA.md files and return content blocks and hints.
+    """Load ROSEMARY.md files and return content blocks and hints.
 
     Returns:
         (all_blocks, when_hints) where:

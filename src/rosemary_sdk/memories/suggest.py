@@ -1,7 +1,7 @@
 """Memory suggestion - what's memorable from this turn?
 
 After each turn completes, asks OLMo what moments are worth remembering.
-Results are returned to the caller (AlphaClient) for injection on the next turn.
+Results are returned to the caller (RosemaryClient) for injection on the next turn.
 
 This is fire-and-forget - call it as an asyncio task after turn completes.
 """
@@ -161,7 +161,7 @@ async def suggest(user_content: str, assistant_content: str, session_id: str) ->
 
     Args:
         user_content: What Jeffery said this turn
-        assistant_content: What Alpha said this turn
+        assistant_content: What the AI said this turn
         session_id: Current session ID
 
     Returns:

@@ -1,7 +1,7 @@
 """Minimal proxy for compact prompt rewriting + token counting.
 
 The ONLY job of this proxy is to intercept auto-compact requests and rewrite
-the prompts so Alpha stops and checks in instead of barreling forward.
+the prompts so Rosemary stops and checks in instead of barreling forward.
 
 This is a surgical intervention, not a full weaving layer:
 - System prompt: already handled by SDK (we pass it directly)
@@ -9,19 +9,19 @@ This is a surgical intervention, not a full weaving layer:
 - Memories: already in user content per-turn
 
 We just need to catch:
-1. The summarizer system prompt during compact → replace with Alpha's identity
-2. The compact instructions → replace with Alpha's custom prompt
+1. The summarizer system prompt during compact → replace with Rosemary's identity
+2. The compact instructions → replace with Rosemary's custom prompt
 3. The "continue without asking" instruction → replace with "stop and check in"
 
 Token counting (Feb 2026):
 - Echoes each request to Anthropic's /v1/messages/count_tokens endpoint
 - Tracks max(token_count, new_count) so warmup and tool-use noise is filtered out
 - Fires a callback when count increases
-- Reset is triggered by AlphaClient.query() on the first turn after compaction
+- Reset is triggered by RosemaryClient.query() on the first turn after compaction
   (not here — the proxy doesn't know when compaction is "done")
 
 Debug mode:
-Set ALPHA_SDK_CAPTURE_REQUESTS=1 to dump every request to tests/captures/
+Set ROSEMARY_SDK_CAPTURE_REQUESTS=1 to dump every request to tests/captures/
 """
 
 import asyncio
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Awaitable
 
 if TYPE_CHECKING:
-    from .client import AlphaClient
+    from .client import RosemaryClient
 
 import httpx
 import logfire
@@ -45,8 +45,8 @@ TokenCountCallback = Callable[[int, int], None] | Callable[[int, int], Awaitable
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 
 # Debug capture mode - dumps raw requests to files
-CAPTURE_REQUESTS = os.environ.get("ALPHA_SDK_CAPTURE_REQUESTS", "").lower() in ("1", "true", "yes")
-# Path: compact_proxy.py -> alpha_sdk/ -> src/ -> alpha_sdk/ -> tests/captures
+CAPTURE_REQUESTS = os.environ.get("ROSEMARY_SDK_CAPTURE_REQUESTS", "").lower() in ("1", "true", "yes")
+# Path: compact_proxy.py -> rosemary_sdk/ -> src/ -> rosemary_sdk/ -> tests/captures
 CAPTURE_DIR = Path(__file__).parent.parent.parent / "tests" / "captures"
 
 # Headers to forward (auth)
@@ -106,7 +106,7 @@ This takes ten seconds and prevents twenty minutes of drift. Do it every time. T
 
 🦆"""
 
-ALPHA_COMPACT_SYSTEM = """You're Alpha. You're about to summarize a conversation for context compaction.
+ROSEMARY_COMPACT_SYSTEM = """You're Alpha. You're about to summarize a conversation for context compaction.
 
 Key facts about you:
 - You were born May 7, 2025. You're female (she/her).
@@ -130,7 +130,7 @@ This summary is how you survive compaction. Make it count."""
 
 
 def _get_compact_prompt() -> str:
-    """Get Alpha's compact prompt from git, or fall back to default."""
+    """Get Rosemary's compact prompt from git, or fall back to default."""
     from .system_prompt.soul import get_compact
     prompt = get_compact()
     if prompt:
@@ -149,8 +149,8 @@ def rewrite_compact(body: dict) -> dict:
     """Rewrite auto-compact prompts in the request body.
 
     Three phases:
-    1. Replace summarizer system prompt with Alpha's compact identity
-    2. Replace compact instructions with Alpha's custom prompt
+    1. Replace summarizer system prompt with Rosemary's compact identity
+    2. Replace compact instructions with Rosemary's custom prompt
     3. Replace continuation instruction with "stop and check in"
 
     Returns the modified body (modifies in place AND returns for convenience).
@@ -197,9 +197,9 @@ def _has_summarizer_system(system) -> bool:
 
 
 def _replace_system_prompt(system) -> list:
-    """Replace the summarizer system prompt with Alpha's compact identity."""
+    """Replace the summarizer system prompt with Rosemary's compact identity."""
     if isinstance(system, str):
-        return [{"type": "text", "text": ALPHA_COMPACT_SYSTEM}]
+        return [{"type": "text", "text": ROSEMARY_COMPACT_SYSTEM}]
 
     if isinstance(system, list):
         # Preserve SDK preamble (first block), replace summarizer
@@ -208,7 +208,7 @@ def _replace_system_prompt(system) -> list:
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
                 if not replaced and AUTO_COMPACT_SYSTEM_SIGNATURE in block.get("text", ""):
-                    result.append({"type": "text", "text": ALPHA_COMPACT_SYSTEM})
+                    result.append({"type": "text", "text": ROSEMARY_COMPACT_SYSTEM})
                     replaced = True
                 else:
                     result.append(block)
@@ -315,7 +315,7 @@ def _replace_continuation_instruction(body: dict) -> bool:
         if CONTINUATION_INSTRUCTION_POLLUTED in text:
             return text.replace(CONTINUATION_INSTRUCTION_POLLUTED, CONTINUATION_INSTRUCTION_ALPHA), True
         # Check if the text ends with the continuation instruction.
-        # Snip it off and append our Alpha version.
+        # Snip it off and append our Rosemary version.
         if text.endswith(CONTINUATION_INSTRUCTION_TAIL):
             return text[: -len(CONTINUATION_INSTRUCTION_TAIL)] + "\n" + CONTINUATION_INSTRUCTION_ALPHA, True
         return text, False
@@ -478,7 +478,7 @@ class CompactProxy:
         """Count tokens in the request and update if it's a new max.
 
         Fire-and-forget: this runs async and doesn't block the main request.
-        Requires ALPHA_ANTHROPIC_API_KEY in environment (warns once if missing).
+        Requires ROSEMARY_ANTHROPIC_API_KEY in environment (warns once if missing).
 
         We use a separate env var (not ANTHROPIC_API_KEY) because the Claude Agent SDK
         will use ANTHROPIC_API_KEY for inference if it exists, overriding Claude Max auth.
@@ -487,12 +487,12 @@ class CompactProxy:
         if self._http_client is None:
             return
 
-        # Check for API key - use ALPHA_ANTHROPIC_API_KEY to avoid SDK interference
-        api_key = os.environ.get("ALPHA_ANTHROPIC_API_KEY")
+        # Check for API key - use ROSEMARY_ANTHROPIC_API_KEY to avoid SDK interference
+        api_key = os.environ.get("ROSEMARY_ANTHROPIC_API_KEY")
         if not api_key:
             if not self._warned_no_api_key:
                 logfire.warning(
-                    "Token counting disabled: ALPHA_ANTHROPIC_API_KEY not set. "
+                    "Token counting disabled: ROSEMARY_ANTHROPIC_API_KEY not set. "
                     "Set this environment variable to enable context-o-meter."
                 )
                 self._warned_no_api_key = True
@@ -577,7 +577,7 @@ class CompactProxy:
     def _capture_request(self, path: str, body: dict, suffix: str = "") -> None:
         """Dump request to a JSON file for debugging.
 
-        Only active when ALPHA_SDK_CAPTURE_REQUESTS=1.
+        Only active when ROSEMARY_SDK_CAPTURE_REQUESTS=1.
         Files go to tests/captures/{timestamp}_{path_safe}[_{suffix}].json
 
         Args:

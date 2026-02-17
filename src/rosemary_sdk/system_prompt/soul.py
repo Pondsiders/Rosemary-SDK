@@ -1,4 +1,4 @@
-"""Soul - the eternal prompt that makes Alpha who she is.
+"""Soul - the eternal prompt.
 
 Loads from local git repository, caches for the session.
 Version-controlled or bust.
@@ -57,12 +57,12 @@ def init() -> None:
     """Initialize the soul at startup. Call once."""
     global _soul_prompt, _compact_prompt
 
-    logfire.debug("Initializing Alpha soul...")
+    logfire.debug("Initializing soul...")
 
     _soul_prompt = _read_from_git(SOUL_FILE)
     if _soul_prompt is None:
         raise RuntimeError(
-            f"FATAL: Could not load Alpha soul doc from {SOUL_REPO_PATH}/{SOUL_FILE}"
+            f"FATAL: Could not load soul doc from {SOUL_REPO_PATH}/{SOUL_FILE}"
         )
 
     _compact_prompt = _read_from_git(COMPACT_FILE)

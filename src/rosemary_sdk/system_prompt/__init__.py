@@ -1,4 +1,4 @@
-"""System prompt assembly - weaving threads into Alpha's context."""
+"""System prompt assembly - weaving threads into Rosemary's context."""
 
 from .assemble import assemble
 from .soul import get_soul, get_compact, init as init_soul

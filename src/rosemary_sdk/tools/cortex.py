@@ -1,13 +1,13 @@
-"""Cortex memory tools - native MCP server for alpha_sdk.
+"""Cortex memory tools - native MCP server for rosemary_sdk.
 
 Direct Postgres access—no HTTP layer, no Cortex service dependency.
 The store() tool clears the pending memorables buffer as a side effect,
 closing the feedback loop with Intro.
 
 Usage:
-    from alpha_sdk.tools import create_cortex_server
+    from rosemary_sdk.tools import create_cortex_server
 
-    # In AlphaClient, get session ID dynamically
+    # In RosemaryClient, get session ID dynamically
     mcp_servers = {
         "cortex": create_cortex_server(get_session_id=lambda: client.session_id)
     }
@@ -31,7 +31,7 @@ def create_cortex_server(
     Args:
         get_session_id: Optional callable that returns the current session ID.
         clear_memorables: Optional callable that clears pending memorables and
-                         returns the count cleared. Provided by AlphaClient.
+                         returns the count cleared. Provided by RosemaryClient.
 
     Returns:
         MCP server configuration dict

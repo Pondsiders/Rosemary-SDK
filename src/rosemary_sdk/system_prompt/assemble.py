@@ -1,6 +1,6 @@
 """System prompt assembly - weaving all threads together.
 
-This is the main entry point for building Alpha's complete system prompt.
+This is the main entry point for building Rosemary's complete system prompt.
 Each piece is fetched and assembled into a coherent whole.
 """
 
@@ -51,7 +51,7 @@ async def _get_hud_extras() -> dict:
 
 
 async def assemble(client: str | None = None, hostname: str | None = None) -> list[dict]:
-    """Assemble the complete Alpha system prompt.
+    """Assemble the complete Rosemary system prompt.
 
     Args:
         client: Client name (e.g., "duckpond", "solitude")
@@ -91,7 +91,7 @@ async def assemble(client: str | None = None, hostname: str | None = None) -> li
         blocks = []
 
         # Soul - who I am
-        blocks.append({"type": "text", "text": f"# Alpha\n\n{get_soul()}"})
+        blocks.append({"type": "text", "text": f"# Rosemary\n\n{get_soul()}"})
 
         # Capsules - what happened yesterday and last night
         if older_capsule:
@@ -120,7 +120,7 @@ async def assemble(client: str | None = None, hostname: str | None = None) -> li
         # Here - client, machine, weather
         blocks.append({"type": "text", "text": here_block})
 
-        # ALPHA.md context files
+        # context files
         for ctx in context_blocks:
             blocks.append({
                 "type": "text",
