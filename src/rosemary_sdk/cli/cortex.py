@@ -1,7 +1,7 @@
 """Cortex CLI - Command line interface for Rosemary's memory system.
 
 Direct Postgres access—no HTTP layer, no Cortex service dependency.
-This is the sysadmin/debugging tool for Jeffery.
+This is the sysadmin/debugging CLI tool.
 
 Usage:
     cortex store "Today I learned about pyrosomes."

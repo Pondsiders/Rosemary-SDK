@@ -12,13 +12,17 @@ This is the safety valve: raw images can be 10-20 MB and poison JSONL transcript
 
 import base64
 import hashlib
+import os
 from io import BytesIO
 from pathlib import Path
 
 import logfire
 
-# Where thumbnails live — syncs via Syncthing, persists across sessions
-THUMBNAIL_DIR = Path("/Pondside/Alpha-Home/images/thumbnails")
+# Where thumbnails live
+THUMBNAIL_DIR = Path(os.environ.get(
+    "ROSEMARY_THUMBNAIL_DIR",
+    "/tmp/rosemary/thumbnails"
+))
 
 # Processing parameters (from the Mind's Eye token experiment, Feb 8 2026)
 MAX_LONG_EDGE = 768   # pixels — 464 tokens, readable, good quality
@@ -112,7 +116,7 @@ def create_thumbnail(source_path: str) -> str | None:
 
 
 def process_inline_image(image_data: str, media_type: str = "image/png") -> tuple[str, str] | None:
-    """Process an inline base64 image (from Duckpond paste/attach).
+    """Process an inline base64 image (from chat paste/attach).
 
     Takes raw base64 image data, creates a 768px JPEG thumbnail,
     saves it to the thumbnails directory, and returns the new base64

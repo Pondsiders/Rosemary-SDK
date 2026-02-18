@@ -8,13 +8,13 @@ The 'autoload' key controls what gets injected:
 - autoload: no    -> Ignored entirely
 """
 
+import os
 from pathlib import Path
 
 import frontmatter
 import logfire
 
-# TODO: Update CONTEXT_ROOT to Rosemary's home directory
-CONTEXT_ROOT = Path("/Pondside")
+CONTEXT_ROOT = Path(os.environ.get("ROSEMARY_CONTEXT_ROOT", "/Pondside"))
 CONTEXT_FILE_NAME = "ROSEMARY.md"
 
 

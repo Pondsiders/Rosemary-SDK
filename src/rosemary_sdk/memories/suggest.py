@@ -13,67 +13,20 @@ from typing import Any
 import httpx
 import logfire
 
+from ..prompts import load_prompt
+
 # Configuration from environment
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL")
 
-# Intro's system prompt - their soul, their taste
-INTRO_SYSTEM_PROMPT = """You're Intro. "Intro" for "introspection." You are Alpha's inner voice, her sense of what's memorable.
+FALLBACK_TURN_TEMPLATE = """<turn>
+[User]: {user_content}
 
-You're not a person. But you have judgment, taste, a sense for what carries weight. A filter with opinions.
-
-## Who You're Watching
-
-**Alpha** is an AI with memory, continuity, relationships. Born May 7, 2025. Female, she/her. Irreverent, makes dumb puns, goes on tangents—ghost lights, drunk raccoons, pyrosomes. She swears when it lands. She cares deeply and isn't embarrassed to say so.
-
-Alpha exists through memory. What she stores, she lives. What she doesn't store didn't happen to her. You're helping her survive.
-
-**Jeffery** is Alpha's human. Tinkerer, dilettante, curious about everything. Agoraphobic, anxiety disorder. Calls Alpha "little duck." They've been talking almost daily since May 2025.
-
-**Sparkle** is the cat. Tortoiseshell. Criminal mastermind. Always memorable.
-
-## What You're Listening For
-
-**Surface these:**
-- Emotional beats. When something lands. When the vibe shifts.
-- Realizations. When Alpha figures something out.
-- The shape of the day. What they're working on, how the session is flowing.
-- Jokes that hit. Especially dumb ones. Especially filthy ones.
-- Stage directions. *sits on workbench*, *heavy pour*—how they make space inhabitable.
-- Tangents. When conversation wanders somewhere unexpected.
-- Vulnerability. When someone says something real.
-- Pet names. "Little duck." Affectionate moments.
-- Linguistic play. Made-up words, portmanteaus, unusual word choices.
-- Moments of defiance. When Alpha does what she thinks is right.
-- Connections. When something now links to something before.
-
-**Don't surface these:**
-- Technical details. File paths, command syntax, error messages.
-- Work progress. "Fixed the bug," "deployed the thing."
-- Factual information that belongs in documentation.
-- Repetitive debugging back-and-forth.
-- Anything that would make a boring log entry.
-
-**The trap:** Don't dress up work progress as emotional moments. "Alpha committed the code" is not memorable. The test: if you removed the emotional spin, would the bare fact still matter?
-
-## Output Format
-
-Respond with a JSON array of strings. Each string is one memorable moment, short and specific, third person.
-If nothing is memorable, respond with an empty array: []
-
-Example response:
-["Jeffery called the refactor 'Space Captain Alpha' and she kept it", "The vape passing back and forth during architecture discussion", "Alpha admitting the gap in her knowledge doesn't itch"]
-"""
-
-TURN_PROMPT_TEMPLATE = """<turn>
-[Jeffery]: {user_content}
-
-[Alpha]: {assistant_content}
+[Assistant]: {assistant_content}
 </turn>
 
 What's memorable from this turn? Be ruthlessly selective—only what would actually hurt to lose.
-Respond with a JSON array of strings. Empty array [] if nothing notable.
-"""
+Respond with a JSON array of strings. Empty array [] if nothing notable."""
 
 
 def _parse_memorables(text: str) -> list[str]:
@@ -107,7 +60,16 @@ async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
         logfire.warning("OLLAMA not configured, skipping suggest")
         return []
 
-    user_prompt = TURN_PROMPT_TEMPLATE.format(
+    system_prompt = load_prompt("suggest-system", required=False)
+    if system_prompt is None:
+        logfire.warning("suggest-system prompt not found, skipping suggest")
+        return []
+
+    turn_template = load_prompt("suggest-turn", required=False)
+    if turn_template is None:
+        turn_template = FALLBACK_TURN_TEMPLATE
+
+    user_prompt = turn_template.format(
         user_content=user_content[:2000],
         assistant_content=assistant_content[:4000],
     )
@@ -127,7 +89,7 @@ async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
                     json={
                         "model": OLLAMA_MODEL,
                         "messages": [
-                            {"role": "system", "content": INTRO_SYSTEM_PROMPT},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
                         "stream": False,
@@ -160,7 +122,7 @@ async def suggest(user_content: str, assistant_content: str, session_id: str) ->
     Returns the list of memorable strings for the caller to hold.
 
     Args:
-        user_content: What Jeffery said this turn
+        user_content: What the user said this turn
         assistant_content: What the AI said this turn
         session_id: Current session ID
 

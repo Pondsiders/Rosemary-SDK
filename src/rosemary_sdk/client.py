@@ -766,7 +766,7 @@ class RosemaryClient:
                         # Recall memories relevant to what we were doing
                         wake_up_prompt = (
                             "You've just been through a context compaction. "
-                            "Jeffery is here and listening. Orient yourself — "
+                            "Your human is here and listening. Orient yourself — "
                             "read the summary above, check in, ask questions "
                             "if anything's unclear."
                         )
@@ -982,7 +982,7 @@ class RosemaryClient:
                 f"## ⚠️ Context Warning — RED ({pct:.0%})\n\n"
                 f"You're at {token_count:,} of {context_window:,} tokens. "
                 "This is not a drill. Wrap up what you're doing and either hand off "
-                "(use the hand-off tool with instructions for next-you) or let Jeffery know "
+                "(use the hand-off tool with instructions for next-you) or let your human know "
                 "it's time to compact. Starting new topics now is risky — you may lose context "
                 "before you can finish them."
             )

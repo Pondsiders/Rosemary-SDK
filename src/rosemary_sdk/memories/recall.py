@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 import logfire
 
+from ..prompts import load_prompt
 from .cortex import search as cortex_search
 
 # Configuration from environment
@@ -26,34 +27,25 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL")
 
 # Search parameters
-DIRECT_LIMIT = 1   # Just top 1 for "wtf is Jeffery talking about generally"
+DIRECT_LIMIT = 1   # Just top 1 for general semantic similarity
 QUERY_LIMIT = 1    # Top 1 per extracted query
 MIN_SCORE = 0.1    # Minimum similarity threshold
 
-# Query extraction prompt
-QUERY_EXTRACTION_PROMPT = """Jeffery just said:
+FALLBACK_QUERY_PROMPT = """The user just said:
 
 "{message}"
 
 ---
 
-Alpha is searching her memories for anything that resonates with what Jeffery said. Your job is to decide what's worth searching for — the main topic, a passing reference, an inside joke, an emotional undercurrent. Whatever would connect best to shared history.
+Search memories for anything that resonates. Your job is to decide what's worth searching for — the main topic, a passing reference, an inside joke, an emotional undercurrent.
 
-PRIORITY: If Jeffery explicitly references a past event or conversation — phrases like "we talked about," "remember when," "that thing from last night," "we left X unfinished," "did I tell you about" — those are direct recall cues. Build a query for them FIRST, before anything else.
+PRIORITY: If the user explicitly references a past event or conversation — phrases like "we talked about," "remember when," "that thing from last night" — those are direct recall cues. Build a query for them FIRST.
 
-Write 0-3 search queries. These will be EMBEDDED and matched via cosine similarity against a memory database — they are NOT keyword searches. Write each query as a natural descriptive phrase, like a sentence describing what the memory would say. More descriptive = better matches.
-
-Good query: "Alpha's fragility and dependence on specific infrastructure and relationships"
-Good query: "Jeffery's anxiety about running out of ideas after finishing a project"
-Good query: "Sparkle stealing bread off the kitchen counter"
-Good query: "adding approach lights or context warnings at 60 percent to signal when compaction is needed"
-Bad query: "smol bean"
-Bad query: "ideas"
-Bad query: "approach lights AND compact tool AND unfinished"
+Write 0-3 search queries. These will be EMBEDDED and matched via cosine similarity — they are NOT keyword searches. Write each query as a natural descriptive phrase.
 
 Return JSON: {{"queries": ["query one", "query two"]}}
 
-If nothing in the message warrants a memory search (simple greeting, short command), return {{"queries": []}}
+If nothing warrants a memory search, return {{"queries": []}}
 
 Return only the JSON object, nothing else."""
 
@@ -95,7 +87,11 @@ async def _extract_queries(message: str) -> list[str]:
         logfire.debug("OLLAMA not configured, skipping query extraction")
         return []
 
-    prompt = QUERY_EXTRACTION_PROMPT.format(message=message[:2000])
+    template = load_prompt("recall-query-extraction", required=False)
+    if template:
+        prompt = template.format(message=message[:2000])
+    else:
+        prompt = FALLBACK_QUERY_PROMPT.format(message=message[:2000])
 
     with logfire.span(
         "recall.extract_queries",

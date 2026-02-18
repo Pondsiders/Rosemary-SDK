@@ -18,11 +18,13 @@ from .context import load_context
 from .calendar import get_events
 from .todos import get_todos
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://alpha-pi:6379")
+REDIS_URL = os.environ.get("REDIS_URL")
 
 
 async def _get_redis() -> aioredis.Redis:
     """Get async Redis connection."""
+    if not REDIS_URL:
+        raise RuntimeError("REDIS_URL environment variable not set")
     return aioredis.from_url(REDIS_URL, decode_responses=True)
 
 

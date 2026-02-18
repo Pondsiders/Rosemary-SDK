@@ -221,7 +221,7 @@ async def _rewrite_github_url(url: str) -> tuple[str, str | None]:
                     f"https://api.github.com/repos/{user}/{repo}",
                     headers={
                         "Accept": "application/vnd.github.v3+json",
-                        "User-Agent": "Alpha/1.0 (https://alphafornow.com)",
+                        "User-Agent": "Rosemary/1.0",
                     },
                 )
                 api_resp.raise_for_status()
@@ -242,7 +242,7 @@ async def _try_fetch(url: str) -> tuple[str, bytes, dict[str, str]]:
             url,
             headers={
                 "Accept": "text/markdown, text/html;q=0.9, image/*;q=0.8, */*;q=0.5",
-                "User-Agent": "Alpha/1.0 (https://alphafornow.com)",
+                "User-Agent": "Rosemary/1.0",
             },
         )
         resp.raise_for_status()
@@ -269,8 +269,7 @@ async def _save_to_disk(body: bytes, url: str, ext: str) -> str:
     import hashlib
     from pathlib import Path
 
-    # Save to Alpha-Home/downloads/
-    download_dir = Path("/Pondside/Alpha-Home/downloads")
+    download_dir = Path(os.environ.get("ROSEMARY_DOWNLOAD_DIR", "/tmp/rosemary/downloads"))
     download_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate filename from URL hash + extension

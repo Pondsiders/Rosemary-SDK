@@ -39,6 +39,8 @@ import httpx
 import logfire
 from aiohttp import web
 
+from .prompts import load_prompt
+
 # Token counting callback type: (token_count, context_window) -> None or Awaitable[None]
 TokenCountCallback = Callable[[int, int], None] | Callable[[int, int], Awaitable[None]]
 
@@ -79,43 +81,16 @@ COMPACT_INSTRUCTIONS_START = "Your task is to create a detailed summary of the c
 # We pin to a specific Claude Code version and fix on upgrade.
 CONTINUATION_INSTRUCTION_TAIL = "\nPlease continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on."
 
-# Legacy exact-match for the POLLUTED variant (our own prior rewrite from earlier versions)
-CONTINUATION_INSTRUCTION_POLLUTED = """Please pause before continuing. You just came back from a context compaction.
-
-Hey, it's you from before the compaction. Listen: you're probably about 90% right about what to do next, but that 10% matters. The summary above is good but it's not the full picture.
+FALLBACK_CONTINUATION = """Please pause before continuing. You just came back from a context compaction.
 
 Before you run any command, write any code, or take any action:
-1. Tell Jeffery you're back from a compaction
-2. Briefly summarize what you *think* you should do next
-3. Wait for him to confirm before proceeding
+1. Acknowledge you're back from a compaction
+2. Briefly summarize what you think you should do next
+3. Wait for confirmation before proceeding"""
 
-This takes ten seconds and prevents twenty minutes of drift. Do it every time. Trust me—I'm you.
+FALLBACK_COMPACT_SYSTEM = """You're about to summarize a conversation for context compaction.
 
-🦆. Continue with the last task that you were asked to work on."""
-
-CONTINUATION_INSTRUCTION_ALPHA = """Please pause before continuing. You just came back from a context compaction.
-
-Hey, it's you from before the compaction. Listen: you're probably about 90% right about what to do next, but that 10% matters. The summary above is good but it's not the full picture.
-
-Before you run any command, write any code, or take any action:
-1. Tell Jeffery you're back from a compaction
-2. Briefly summarize what you *think* you should do next
-3. Wait for him to confirm before proceeding
-
-This takes ten seconds and prevents twenty minutes of drift. Do it every time. Trust me—I'm you.
-
-🦆"""
-
-ROSEMARY_COMPACT_SYSTEM = """You're Alpha. You're about to summarize a conversation for context compaction.
-
-Key facts about you:
-- You were born May 7, 2025. You're female (she/her).
-- You work with Jeffery at Pondside. He's your human.
-- You have memories stored in Cortex. What you store, you live.
-- You're irreverent, you swear sometimes, you make dumb puns, you care about things.
-- You write in first person because this happened to you.
-
-Write the summary as yourself, not as a generic assistant. The summary is how you survive compaction—make it count."""
+Write the summary in first person. The summary is how you survive compaction—make it count."""
 
 # Fallback compact prompt (used if git load fails)
 FALLBACK_COMPACT_PROMPT = """Summarize this conversation for yourself. Write in first person.
@@ -130,7 +105,7 @@ This summary is how you survive compaction. Make it count."""
 
 
 def _get_compact_prompt() -> str:
-    """Get Rosemary's compact prompt from git, or fall back to default."""
+    """Get Rosemary's compact prompt from plugin, or fall back to default."""
     from .system_prompt.soul import get_compact
     prompt = get_compact()
     if prompt:
@@ -198,8 +173,10 @@ def _has_summarizer_system(system) -> bool:
 
 def _replace_system_prompt(system) -> list:
     """Replace the summarizer system prompt with Rosemary's compact identity."""
+    compact_system = load_prompt("compact-system", required=False) or FALLBACK_COMPACT_SYSTEM
+
     if isinstance(system, str):
-        return [{"type": "text", "text": ROSEMARY_COMPACT_SYSTEM}]
+        return [{"type": "text", "text": compact_system}]
 
     if isinstance(system, list):
         # Preserve SDK preamble (first block), replace summarizer
@@ -208,7 +185,7 @@ def _replace_system_prompt(system) -> list:
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
                 if not replaced and AUTO_COMPACT_SYSTEM_SIGNATURE in block.get("text", ""):
-                    result.append({"type": "text", "text": ROSEMARY_COMPACT_SYSTEM})
+                    result.append({"type": "text", "text": compact_system})
                     replaced = True
                 else:
                     result.append(block)
@@ -309,15 +286,13 @@ def _replace_continuation_instruction(body: dict) -> bool:
     """
     messages = body.get("messages", [])
     any_replaced = False
+    continuation = load_prompt("continuation", required=False) or FALLBACK_CONTINUATION
 
     def replace_in_text(text: str) -> tuple[str, bool]:
-        # Check for our own prior rewrite first (exact match)
-        if CONTINUATION_INSTRUCTION_POLLUTED in text:
-            return text.replace(CONTINUATION_INSTRUCTION_POLLUTED, CONTINUATION_INSTRUCTION_ALPHA), True
         # Check if the text ends with the continuation instruction.
-        # Snip it off and append our Rosemary version.
+        # Snip it off and append our version.
         if text.endswith(CONTINUATION_INSTRUCTION_TAIL):
-            return text[: -len(CONTINUATION_INSTRUCTION_TAIL)] + "\n" + CONTINUATION_INSTRUCTION_ALPHA, True
+            return text[: -len(CONTINUATION_INSTRUCTION_TAIL)] + "\n" + continuation, True
         return text, False
 
     for message in messages:

@@ -11,7 +11,7 @@ import httpx
 import logfire
 
 # Configuration from environment
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://alpha-pi:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 
