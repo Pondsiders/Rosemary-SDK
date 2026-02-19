@@ -1,6 +1,6 @@
-"""Postgres database operations for Cortex.
+"""Postgres database operations for memory storage.
 
-Direct asyncpg access to the cortex database with pgvector.
+Direct asyncpg access to Neon with pgvector.
 """
 
 import json
@@ -11,8 +11,8 @@ from typing import Any
 import asyncpg
 import logfire
 
-# Configuration from environment
-DATABASE_URL = os.environ.get("DATABASE_URL")
+# Configuration from environment — crash at import time if not set
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 # Module-level connection pool (lazy initialized)
 _pool: asyncpg.Pool | None = None
@@ -22,8 +22,6 @@ async def get_pool() -> asyncpg.Pool:
     """Get or create the connection pool."""
     global _pool
     if _pool is None:
-        if not DATABASE_URL:
-            raise RuntimeError("DATABASE_URL environment variable not set")
         _pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=2,
@@ -73,7 +71,7 @@ async def store_memory(
         async with pool.acquire() as conn:
             memory_id = await conn.fetchval(
                 """
-                INSERT INTO cortex.memories (content, embedding, metadata)
+                INSERT INTO memories (content, embedding, metadata)
                 VALUES ($1, $2, $3)
                 RETURNING id
                 """,
@@ -146,7 +144,7 @@ async def search_memories(
                         content,
                         metadata,
                         ts_rank(content_tsv, plainto_tsquery('english', ${param_idx})) as score
-                    FROM cortex.memories
+                    FROM memories
                     WHERE {where_clause}
                       AND content_tsv @@ plainto_tsquery('english', ${param_idx})
                     ORDER BY score DESC
@@ -178,7 +176,7 @@ async def search_memories(
                             ) as fts_score,
                             -- Cosine similarity is already 0-1 for normalized vectors
                             1 - (embedding <=> ${param_idx + 1}::vector) as sem_score
-                        FROM cortex.memories
+                        FROM memories
                         WHERE {where_clause}
                           AND embedding IS NOT NULL
                     )
@@ -224,7 +222,7 @@ async def get_recent_memories(
             rows = await conn.fetch(
                 """
                 SELECT id, content, metadata
-                FROM cortex.memories
+                FROM memories
                 WHERE NOT forgotten
                   AND (metadata->>'created_at')::timestamptz >= $1
                 ORDER BY (metadata->>'created_at')::timestamptz DESC
@@ -253,7 +251,7 @@ async def get_memory(memory_id: int) -> dict[str, Any] | None:
         row = await conn.fetchrow(
             """
             SELECT id, content, metadata
-            FROM cortex.memories
+            FROM memories
             WHERE id = $1 AND NOT forgotten
             """,
             memory_id,
@@ -274,7 +272,7 @@ async def forget_memory(memory_id: int) -> bool:
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
-            UPDATE cortex.memories
+            UPDATE memories
             SET forgotten = TRUE
             WHERE id = $1 AND NOT forgotten
             """,
@@ -283,15 +281,121 @@ async def forget_memory(memory_id: int) -> bool:
         return result == "UPDATE 1"
 
 
+async def search_sage_messages(
+    query_embedding: list[float],
+    query_text: str,
+    limit: int = 5,
+    kylee_penalty: float = 0.15,
+    sage_penalty: float = 0.25,
+    min_score: float | None = None,
+    exclude: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Search the Sage archive with hybrid scoring, penalized below own memories.
+
+    Speaker-differentiated penalties: Kylee's own words get a smaller penalty
+    (more likely to surface) than Sage's responses (more likely to be generic).
+    Both penalties ensure Rosemary's own memories always rank above archive hits.
+    """
+    pool = await get_pool()
+
+    with logfire.span(
+        "cortex.db.search_sage",
+        query_preview=query_text[:50],
+        limit=limit,
+        kylee_penalty=kylee_penalty,
+        sage_penalty=sage_penalty,
+    ) as span:
+        async with pool.acquire() as conn:
+            # Build dynamic WHERE clause
+            conditions = ["m.searchable = true", "m.embedding IS NOT NULL"]
+            params: list = []
+            param_idx = 1
+
+            if exclude:
+                conditions.append(f"m.id != ALL(${param_idx}::int[])")
+                params.append(exclude)
+                param_idx += 1
+
+            where_clause = " AND ".join(conditions)
+
+            # Fixed positional params after dynamic ones
+            text_idx = param_idx
+            embed_idx = param_idx + 1
+            kylee_pen_idx = param_idx + 2
+            sage_pen_idx = param_idx + 3
+            limit_idx = param_idx + 4
+
+            embedding_json = json.dumps(query_embedding)
+            params.extend([query_text, embedding_json, kylee_penalty, sage_penalty, limit])
+            next_idx = param_idx + 5
+
+            min_score_clause = ""
+            if min_score is not None:
+                min_score_clause = f"WHERE score >= ${next_idx}"
+                params.append(min_score)
+
+            query = f"""
+                WITH scored AS (
+                    SELECT
+                        m.id,
+                        m.speaker,
+                        m.content,
+                        m.created_at,
+                        c.title as conversation_title,
+                        COALESCE(
+                            ts_rank(m.content_tsv, plainto_tsquery('english', ${text_idx})),
+                            0
+                        ) as fts_score,
+                        1 - (m.embedding <=> ${embed_idx}::vector) as sem_score
+                    FROM sage_messages m
+                    JOIN sage_conversations c ON c.id = m.conversation_id
+                    WHERE {where_clause}
+                ),
+                penalized AS (
+                    SELECT
+                        id,
+                        speaker,
+                        content,
+                        created_at,
+                        conversation_title,
+                        (0.3 * LEAST(fts_score, 1.0) + 0.7 * sem_score
+                            - CASE WHEN speaker = 'kylee' THEN ${kylee_pen_idx}::float8
+                                   ELSE ${sage_pen_idx}::float8 END) as score
+                    FROM scored
+                )
+                SELECT *
+                FROM penalized
+                {min_score_clause}
+                ORDER BY score DESC
+                LIMIT ${limit_idx}
+            """
+
+            rows = await conn.fetch(query, *params)
+            span.set_attribute("result_count", len(rows))
+
+            return [
+                {
+                    "id": row["id"],
+                    "speaker": row["speaker"],
+                    "content": row["content"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                    "conversation_title": row["conversation_title"],
+                    "score": float(row["score"]),
+                    "source": "archive",
+                }
+                for row in rows
+            ]
+
+
 async def health_check() -> tuple[bool, int | None]:
     """Check database health, return (healthy, memory_count)."""
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
             count = await conn.fetchval(
-                "SELECT COUNT(*) FROM cortex.memories WHERE NOT forgotten"
+                "SELECT COUNT(*) FROM memories WHERE NOT forgotten"
             )
             return True, count
     except Exception as e:
-        logfire.warning(f"Cortex database health check failed: {e}")
-        return False, None
+        logfire.error(f"Cortex database health check failed: {e}")
+        raise

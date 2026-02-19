@@ -36,7 +36,7 @@ async def get_capsules() -> tuple[str | None, str | None]:
         async with pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT period_start, period_end, summary
-                FROM cortex.summaries
+                FROM summaries
                 ORDER BY period_start DESC
                 LIMIT 2
             """)

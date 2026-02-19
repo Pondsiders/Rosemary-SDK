@@ -10,8 +10,8 @@ import os
 import httpx
 import logfire
 
-# Configuration from environment
-OLLAMA_URL = os.environ.get("OLLAMA_URL")
+# Configuration from environment — crash at import time if not set
+OLLAMA_URL = os.environ["OLLAMA_URL"]
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 

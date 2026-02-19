@@ -15,6 +15,7 @@ from .images import create_thumbnail
 from .db import (
     store_memory,
     search_memories,
+    search_sage_messages,
     get_recent_memories,
     get_memory,
     forget_memory,
@@ -27,6 +28,7 @@ from .embeddings import health_check as ollama_health_check
 __all__ = [
     "store",
     "search",
+    "search_sage",
     "recent",
     "get",
     "forget",
@@ -94,7 +96,7 @@ async def store(
             return None
         except Exception as e:
             logfire.error("Cortex store failed", error=str(e))
-            return None
+            raise
 
 
 async def search(
@@ -165,7 +167,59 @@ async def search(
             return []
         except Exception as e:
             logfire.error("Cortex search failed", error=str(e))
+            raise
+
+
+async def search_sage(
+    query: str,
+    limit: int = 3,
+    kylee_penalty: float = 0.15,
+    sage_penalty: float = 0.25,
+    min_score: float | None = MIN_SCORE,
+    exclude: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Search the Sage archive for relevant passages.
+
+    Speaker-differentiated penalties: Kylee's words get a smaller penalty
+    (0.15) than Sage's responses (0.25), because Kylee's own words are
+    more valuable as context than Sage's generic helpful-assistant output.
+
+    Args:
+        query: The search query
+        limit: Maximum results to return
+        kylee_penalty: Penalty for Kylee's messages (lower = surfaces more)
+        sage_penalty: Penalty for Sage's messages (higher = surfaces less)
+        min_score: Minimum similarity threshold (after penalty)
+        exclude: Sage message IDs to skip
+
+    Returns:
+        List of archive hit dicts with id, speaker, content, created_at,
+        conversation_title, score, source="archive"
+    """
+    with logfire.span("cortex.search_sage", query_preview=query[:50]) as span:
+        try:
+            query_embedding = await embed_query(query)
+
+            results = await search_sage_messages(
+                query_embedding=query_embedding,
+                query_text=query,
+                limit=limit,
+                kylee_penalty=kylee_penalty,
+                sage_penalty=sage_penalty,
+                min_score=min_score,
+                exclude=exclude,
+            )
+
+            span.set_attribute("result_count", len(results))
+            logfire.debug("Sage search complete", query_preview=query[:30], results=len(results))
+            return results
+
+        except EmbeddingError as e:
+            logfire.error("Embedding failed during sage search", error=str(e))
             return []
+        except Exception as e:
+            logfire.error("Sage search failed", error=str(e))
+            raise
 
 
 async def recent(limit: int = 10, hours: int = 24) -> list[dict[str, Any]]:
@@ -201,7 +255,7 @@ async def recent(limit: int = 10, hours: int = 24) -> list[dict[str, Any]]:
 
         except Exception as e:
             logfire.error("Cortex recent failed", error=str(e))
-            return []
+            raise
 
 
 async def get(memory_id: int) -> dict[str, Any] | None:
@@ -230,7 +284,7 @@ async def get(memory_id: int) -> dict[str, Any] | None:
         return mem
     except Exception as e:
         logfire.error("Cortex get failed", error=str(e))
-        return None
+        raise
 
 
 async def forget(memory_id: int) -> bool:
@@ -246,7 +300,7 @@ async def forget(memory_id: int) -> bool:
         return await forget_memory(memory_id)
     except Exception as e:
         logfire.error("Cortex forget failed", error=str(e))
-        return False
+        raise
 
 
 async def health() -> dict[str, Any]:

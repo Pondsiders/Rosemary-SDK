@@ -15,18 +15,9 @@ import logfire
 
 from ..prompts import load_prompt
 
-# Configuration from environment
-OLLAMA_URL = os.environ.get("OLLAMA_URL")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL")
-
-FALLBACK_TURN_TEMPLATE = """<turn>
-[User]: {user_content}
-
-[Assistant]: {assistant_content}
-</turn>
-
-What's memorable from this turn? Be ruthlessly selective—only what would actually hurt to lose.
-Respond with a JSON array of strings. Empty array [] if nothing notable."""
+# Configuration from environment — crash at import time if not set
+OLLAMA_URL = os.environ["OLLAMA_URL"]
+OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
 
 
 def _parse_memorables(text: str) -> list[str]:
@@ -56,18 +47,8 @@ def _parse_memorables(text: str) -> list[str]:
 
 async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
     """Ask OLMo what's memorable from this turn."""
-    if not OLLAMA_URL or not OLLAMA_MODEL:
-        logfire.warning("OLLAMA not configured, skipping suggest")
-        return []
-
-    system_prompt = load_prompt("suggest-system", required=False)
-    if system_prompt is None:
-        logfire.warning("suggest-system prompt not found, skipping suggest")
-        return []
-
-    turn_template = load_prompt("suggest-turn", required=False)
-    if turn_template is None:
-        turn_template = FALLBACK_TURN_TEMPLATE
+    system_prompt = load_prompt("suggest-system")
+    turn_template = load_prompt("suggest-turn")
 
     user_prompt = turn_template.format(
         user_content=user_content[:2000],

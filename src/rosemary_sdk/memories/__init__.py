@@ -7,7 +7,7 @@ Cortex is now fully absorbed into rosemary_sdk:
 - recall/suggest are higher-level functions that use them
 """
 
-from .cortex import store, search, recent, get, forget, health, close, EmbeddingError
+from .cortex import store, search, search_sage, recent, get, forget, health, close, EmbeddingError
 from .images import create_thumbnail, load_thumbnail_base64, process_inline_image
 from .recall import recall
 from .suggest import suggest
@@ -16,6 +16,7 @@ __all__ = [
     # Core Cortex operations
     "store",
     "search",
+    "search_sage",
     "recent",
     "get",
     "forget",

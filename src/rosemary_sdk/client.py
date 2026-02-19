@@ -117,6 +117,49 @@ def _format_memory(memory: dict) -> str:
     return f"## Memory #{mem_id} ({relative_time}{score_str})\n{content}"
 
 
+def _format_archive_hit(hit: dict) -> str:
+    """Format a Sage archive hit for inclusion in user content.
+
+    Uses PSO-8601 timestamps with speaker labels to make it clear
+    this is inherited context from the Sage archive, not lived experience.
+    """
+    import pendulum
+
+    content = hit.get("content", "").strip()
+    # Truncate long archive content to ~125 tokens — enough for gist,
+    # prevents 2K-token paper drafts from eating context window
+    if len(content) > 500:
+        content = content[:500] + "…"
+    speaker = hit.get("speaker", "unknown")
+    speaker_name = "Kylee" if speaker == "kylee" else "Sage"
+    created_at = hit.get("created_at", "")
+    score = hit.get("score")
+    conversation_title = hit.get("conversation_title", "")
+
+    # PSO-8601 timestamp
+    timestamp = ""
+    try:
+        dt = pendulum.parse(created_at)
+        timestamp = dt.format("ddd MMM D YYYY h:mm A")
+    except Exception:
+        timestamp = created_at or "unknown date"
+
+    score_str = f", score {score:.2f}" if score is not None else ""
+    title_str = f" — {conversation_title}" if conversation_title else ""
+
+    return (
+        f"## Sage Archive ({timestamp}{score_str}{title_str})\n"
+        f"[{speaker_name}]: {content}"
+    )
+
+
+def _format_recall_result(result: dict) -> str:
+    """Format a recall result, dispatching to the right formatter by source."""
+    if result.get("source") == "archive":
+        return _format_archive_hit(result)
+    return _format_memory(result)
+
+
 class RosemaryClient:
     """Long-lived client that wraps Claude Agent SDK.
 
@@ -389,14 +432,14 @@ class RosemaryClient:
                 span.set_attribute("memorables_nudged", len(self._pending_memorables))
                 self._pending_memorables = []  # Consumed
 
-            # Recall memories for this prompt
+            # Recall memories + archive hits for this prompt
             memories = await recall(prompt_text, self._current_session_id or "new")
             if memories:
                 images_injected = 0
                 for mem in memories:
                     content_blocks.append({
                         "type": "text",
-                        "text": _format_memory(mem)
+                        "text": _format_recall_result(mem)
                     })
                     # Mind's Eye: if memory has an attached image, inject it
                     if mem.get("image_path"):
@@ -775,7 +818,7 @@ class RosemaryClient:
                             for mem in memories:
                                 wake_up_blocks.append({
                                     "type": "text",
-                                    "text": _format_memory(mem),
+                                    "text": _format_recall_result(mem),
                                 })
                                 if mem.get("image_path"):
                                     image_data = load_thumbnail_base64(mem["image_path"])
