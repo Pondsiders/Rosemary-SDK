@@ -95,8 +95,8 @@ def _format_memory(memory: dict) -> str:
     # Simple relative time formatting
     relative_time = created_at  # fallback
     try:
-        dt = pendulum.parse(created_at)
-        now = pendulum.now(dt.timezone or "America/Los_Angeles")
+        dt = pendulum.parse(created_at).in_tz("America/Los_Angeles")
+        now = pendulum.now("America/Los_Angeles")
         diff = now.diff(dt)
         if diff.in_days() == 0:
             relative_time = f"today at {dt.format('h:mm A')}"
