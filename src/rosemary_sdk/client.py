@@ -54,8 +54,12 @@ from .tools.forge import create_forge_server
 from .tools.handoff import create_handoff_server
 from .system_prompt.soul import get_soul
 
-# The Rosemary Plugin — agents, skills, and tools bundled in a sibling repo
-_ROSEMARY_PLUGIN_DIR = str(Path(__file__).parent.parent.parent.parent / "Rosemary-Plugin")
+# The Rosemary Plugin — agents, skills, and tools bundled in a sibling repo.
+# In Docker the plugin is bind-mounted elsewhere, so respect the env var.
+_ROSEMARY_PLUGIN_DIR = os.environ.get(
+    "ROSEMARY_PLUGIN_DIR",
+    str(Path(__file__).parent.parent.parent.parent / "Rosemary-Plugin"),
+)
 
 # Store original ANTHROPIC_BASE_URL so we can restore it
 _ORIGINAL_ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL")
@@ -190,6 +194,7 @@ class RosemaryClient:
         client_name: str = "rosemary_sdk",
         hostname: str | None = None,
         allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
         mcp_servers: dict | None = None,
         archive: bool = True,
         include_partial_messages: bool = True,
@@ -203,6 +208,7 @@ class RosemaryClient:
             client_name: Name of the client (for logging, HUD)
             hostname: Machine hostname (auto-detected if not provided)
             allowed_tools: List of allowed tool names
+            disallowed_tools: List of disallowed tool names
             mcp_servers: Dict of MCP server configurations
             archive: Whether to archive turns to Postgres
             include_partial_messages: Stream partial messages for real-time updates
@@ -214,6 +220,7 @@ class RosemaryClient:
         self.client_name = client_name
         self.hostname = hostname
         self.allowed_tools = allowed_tools
+        self.disallowed_tools = disallowed_tools
         self.mcp_servers = mcp_servers or {}
         self.archive = archive
         self.include_partial_messages = include_partial_messages
@@ -241,9 +248,9 @@ class RosemaryClient:
         # Hand-off: compact instructions set by the hand-off tool, consumed after stream
         self._pending_compact: str | None = None
 
-        # Approach lights: escalating context warnings at 60% and 70%
+        # Approach lights: escalating context warnings at 65% and 75%
         # Tracks the highest tier warned so we don't repeat the same warning
-        self._approach_warned: int = 0  # 0=none, 1=amber(60%), 2=red(70%)
+        self._approach_warned: int = 0  # 0=none, 1=amber(65%), 2=red(75%)
 
     # -------------------------------------------------------------------------
     # Session Discovery (static methods)
@@ -999,8 +1006,8 @@ class RosemaryClient:
         """Check context usage and return an approach light warning if threshold crossed.
 
         Two tiers:
-        - Amber (60%): gentle heads-up to start thinking about pausing
-        - Red (70%): stern warning to wrap up or hand off
+        - Amber (65%): gentle heads-up to start thinking about pausing
+        - Red (75%): stern warning to wrap up or hand off
 
         Only fires once per tier (resets after compaction).
         Returns the warning text, or None if no warning needed.
@@ -1015,7 +1022,7 @@ class RosemaryClient:
 
         pct = token_count / context_window
 
-        if pct >= 0.70 and self._approach_warned < 2:
+        if pct >= 0.75 and self._approach_warned < 2:
             self._approach_warned = 2
             logfire.warn(
                 "Approach light: RED ({pct:.0%})",
@@ -1030,7 +1037,7 @@ class RosemaryClient:
                 "before you can finish them."
             )
 
-        if pct >= 0.60 and self._approach_warned < 1:
+        if pct >= 0.65 and self._approach_warned < 1:
             self._approach_warned = 1
             logfire.info(
                 "Approach light: AMBER ({pct:.0%})",
@@ -1271,6 +1278,7 @@ class RosemaryClient:
             "system_prompt": self._system_prompt,  # Just the soul!
             "model": self.ROSEMARY_MODEL,  # Rosemary IS this model
             "allowed_tools": allowed,
+            "disallowed_tools": self.disallowed_tools or [],
             "mcp_servers": merged_servers,
             "include_partial_messages": self.include_partial_messages,
             "resume": session_id,

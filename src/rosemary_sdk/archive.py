@@ -56,7 +56,7 @@ async def _embed_and_update(row_id: int, content: str) -> bool:
             async with pool.acquire() as conn:
                 await conn.execute(
                     """
-                    UPDATE scribe.messages
+                    UPDATE messages
                     SET embedding = $1::vector
                     WHERE id = $2
                     """,
@@ -158,7 +158,7 @@ async def archive_turn(
                 for i, row in enumerate(rows):
                     result = await conn.fetchval(
                         """
-                        INSERT INTO scribe.messages (timestamp, role, content, session_id)
+                        INSERT INTO messages (timestamp, role, content, session_id)
                         VALUES ($1, $2, $3, $4)
                         ON CONFLICT (timestamp, role, md5(content)) DO NOTHING
                         RETURNING id
