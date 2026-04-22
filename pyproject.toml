@@ -11,6 +11,7 @@ dependencies = [
     "html2text>=2024.2.26",
     "httpx>=0.28.0",
     "logfire[httpx]>=3.0.0",
+    "openai>=1.50.0",
     "pendulum>=3.0.0",
     "pgvector>=0.3.0",
     "psycopg[binary]>=3.0.0",

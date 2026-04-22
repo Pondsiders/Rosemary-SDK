@@ -2,7 +2,7 @@
 
 Given a user prompt, searches Cortex using two parallel strategies:
 1. Direct embedding search (fast, catches overall semantic similarity)
-2. OLMo query extraction (slower, catches distinctive terms in long prompts)
+2. Chat-model query extraction (slower, catches distinctive terms in long prompts)
 
 Both strategies also search the Sage archive (Kylee's previous AI conversations)
 with a flat penalty so own memories always rank above equivalent archive hits.
@@ -16,15 +16,14 @@ import json
 import os
 from typing import Any
 
-import httpx
 import logfire
 
+from ..inference_client import get_client
 from ..prompts import load_prompt
 from .cortex import search as cortex_search, search_sage as sage_search
 
 # Configuration from environment — crash at import time if not set
-OLLAMA_URL = os.environ["OLLAMA_URL"]
-OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
+CHAT_MODEL = os.environ["CHAT_MODEL"]
 
 # Memory search parameters
 DIRECT_LIMIT = 1   # Top 1 own memory for general semantic similarity
@@ -82,7 +81,7 @@ def clear_seen(session_id: str | None = None) -> None:
 
 
 async def _extract_queries(message: str) -> list[str]:
-    """Extract search queries from a user message using Ollama.
+    """Extract search queries from a user message using the chat model.
 
     Returns 0-3 descriptive queries, or empty list if message doesn't warrant search.
     """
@@ -93,30 +92,32 @@ async def _extract_queries(message: str) -> list[str]:
         "recall.extract_queries",
         **{
             "gen_ai.operation.name": "chat",
-            "gen_ai.provider.name": "ollama",
-            "gen_ai.request.model": OLLAMA_MODEL,
+            "gen_ai.system": "openai",
+            "gen_ai.request.model": CHAT_MODEL,
         }
     ) as span:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    f"{OLLAMA_URL}/api/chat",
-                    json={
-                        "model": OLLAMA_MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "stream": False,
-                        "format": "json",
-                        "options": {"num_ctx": 4096},
-                    },
-                )
-                response.raise_for_status()
+            # Gemma 3 non-thinking sampling (per Unsloth model card).
+            response = await get_client().chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=1.0,
+                top_p=0.95,
+                response_format={"type": "json_object"},
+                extra_body={
+                    "top_k": 64,
+                    "min_p": 0.0,
+                    "repetition_penalty": 1.0,
+                },
+                timeout=15.0,
+            )
 
-            result = response.json()
-            output = result.get("message", {}).get("content", "")
+            output = response.choices[0].message.content or ""
 
-            span.set_attribute("gen_ai.usage.input_tokens", result.get("prompt_eval_count", 0))
-            span.set_attribute("gen_ai.usage.output_tokens", result.get("eval_count", 0))
-            span.set_attribute("gen_ai.response.model", OLLAMA_MODEL)
+            if response.usage:
+                span.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                span.set_attribute("gen_ai.usage.output_tokens", response.usage.completion_tokens)
+            span.set_attribute("gen_ai.response.model", CHAT_MODEL)
 
             parsed = json.loads(output)
             queries = parsed.get("queries", [])
@@ -129,7 +130,7 @@ async def _extract_queries(message: str) -> list[str]:
             return []
 
         except json.JSONDecodeError as e:
-            logfire.warning("Failed to parse OLMo response as JSON", error=str(e))
+            logfire.warning("Failed to parse extract_queries response as JSON", error=str(e))
             return []
         except Exception as e:
             logfire.error("Query extraction failed", error=str(e))
@@ -226,7 +227,7 @@ async def recall(prompt: str, session_id: str) -> list[dict[str, Any]]:
     Uses three parallel strategies:
     1. Direct embedding search of own memories
     2. Direct embedding search of Sage archive (penalized)
-    3. OLMo query extraction + search of both sources
+    3. Chat-model query extraction + search of both sources
 
     Results are merged by score (highest first) and deduped.
     Filtered via in-process seen-caches (separate for memories and archive).

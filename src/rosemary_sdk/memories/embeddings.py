@@ -1,18 +1,22 @@
-"""Ollama embeddings client for Cortex.
+"""Embeddings client for Cortex.
 
-Uses nomic-embed-text with proper task prefixes:
+Uses nomic-embed-text (or v1.5) with proper task prefixes:
 - search_document: for storing memories
 - search_query: for searching memories
+
+Talks to whatever OpenAI-compatible endpoint is configured via
+OPENAI_BASE_URL (llmster, LM Studio, Harbormaster, OpenAI, etc.).
 """
 
 import os
 
-import httpx
 import logfire
+from openai import APIConnectionError, APIError, APITimeoutError
+
+from ..inference_client import get_client
 
 # Configuration from environment — crash at import time if not set
-OLLAMA_URL = os.environ["OLLAMA_URL"]
-OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
 
 
 class EmbeddingError(Exception):
@@ -37,51 +41,39 @@ async def embed_query(query: str) -> list[float]:
 
 
 async def _embed(prompt: str, timeout: float = 5.0) -> list[float]:
-    """Call Ollama API to generate embedding."""
+    """Call the OpenAI-compatible endpoint to generate an embedding."""
     with logfire.span(
         "cortex.embed",
-        model=OLLAMA_EMBED_MODEL,
+        model=EMBED_MODEL,
         prompt_preview=prompt[:50],
     ) as span:
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    f"{OLLAMA_URL.rstrip('/')}/api/embeddings",
-                    json={
-                        "model": OLLAMA_EMBED_MODEL,
-                        "prompt": prompt,
-                        "keep_alive": -1,  # Keep model loaded indefinitely
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                embedding = data["embedding"]
-                span.set_attribute("embedding_dim", len(embedding))
-                return embedding
-        except httpx.TimeoutException:
-            logfire.warning(f"Ollama timeout after {timeout}s")
-            raise EmbeddingError("Embedding service timed out")
-        except httpx.HTTPStatusError as e:
-            body = e.response.text[:500] if e.response else "no response body"
-            logfire.warning(
-                "Ollama HTTP error: {status_code} - {body}",
-                status_code=e.response.status_code,
-                body=body,
+            response = await get_client().embeddings.create(
+                model=EMBED_MODEL,
+                input=prompt,
+                timeout=timeout,
             )
-            raise EmbeddingError(f"Embedding service error {e.response.status_code}: {body}")
-        except httpx.ConnectError:
-            logfire.warning(f"Ollama unreachable at {OLLAMA_URL}")
+            embedding = response.data[0].embedding
+            span.set_attribute("embedding_dim", len(embedding))
+            return embedding
+        except APITimeoutError:
+            logfire.warning(f"Embedding timeout after {timeout}s")
+            raise EmbeddingError("Embedding service timed out")
+        except APIConnectionError:
+            logfire.warning("Embedding service unreachable")
             raise EmbeddingError("Embedding service unreachable")
+        except APIError as e:
+            logfire.warning("Embedding API error: {error}", error=str(e))
+            raise EmbeddingError(f"Embedding service error: {e}")
         except Exception as e:
-            logfire.error(f"Ollama unexpected error: {e}")
+            logfire.error(f"Embedding unexpected error: {e}")
             raise EmbeddingError(f"Embedding failed: {e}")
 
 
 async def health_check() -> bool:
-    """Check if Ollama is reachable."""
+    """Check if the inference endpoint is reachable."""
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(f"{OLLAMA_URL.rstrip('/')}/api/tags")
-            return response.status_code == 200
+        await get_client().models.list()
+        return True
     except Exception:
         return False

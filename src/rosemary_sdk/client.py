@@ -50,7 +50,6 @@ from .sessions import list_sessions, get_session_path, get_sessions_dir, Session
 from .system_prompt import assemble
 from .tools.cortex import create_cortex_server
 from .tools.fetch import create_fetch_server
-from .tools.forge import create_forge_server
 from .tools.handoff import create_handoff_server
 from .system_prompt.soul import get_soul
 
@@ -1249,7 +1248,6 @@ class RosemaryClient:
                 clear_memorables=self.clear_memorables,
             ),
             "fetch": create_fetch_server(),
-            "forge": create_forge_server(),
             "handoff": create_handoff_server(
                 on_handoff=self.request_compact,
                 store_memory=self._store_memory_for_handoff,
@@ -1264,7 +1262,6 @@ class RosemaryClient:
             "mcp__cortex__search",
             "mcp__cortex__recent",
             "mcp__fetch__fetch",
-            "mcp__forge__imagine",
             "mcp__handoff__handoff",
         ]
         allowed = list(self.allowed_tools or [])

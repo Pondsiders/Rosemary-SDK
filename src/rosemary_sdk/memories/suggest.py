@@ -1,27 +1,26 @@
 """Memory suggestion - what's memorable from this turn?
 
-After each turn completes, asks OLMo what moments are worth remembering.
-Results are returned to the caller (RosemaryClient) for injection on the next turn.
+After each turn completes, asks the chat model what moments are worth
+remembering. Results are returned to the caller (RosemaryClient) for
+injection on the next turn.
 
 This is fire-and-forget - call it as an asyncio task after turn completes.
 """
 
 import json
 import os
-from typing import Any
 
-import httpx
 import logfire
 
+from ..inference_client import get_client
 from ..prompts import load_prompt
 
 # Configuration from environment — crash at import time if not set
-OLLAMA_URL = os.environ["OLLAMA_URL"]
-OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
+CHAT_MODEL = os.environ["CHAT_MODEL"]
 
 
 def _parse_memorables(text: str) -> list[str]:
-    """Parse JSON array of strings from OLMo output."""
+    """Parse JSON array of strings from model output."""
     if not text:
         return []
 
@@ -32,7 +31,7 @@ def _parse_memorables(text: str) -> list[str]:
     end = text.rfind("]") + 1
 
     if start == -1 or end == 0:
-        logfire.warning("No JSON array found in OLMo output", raw=text[:200])
+        logfire.warning("No JSON array found in suggest output", raw=text[:200])
         return []
 
     try:
@@ -41,12 +40,12 @@ def _parse_memorables(text: str) -> list[str]:
             return [s.strip() for s in result if isinstance(s, str) and s.strip()]
         return []
     except json.JSONDecodeError as e:
-        logfire.warning("Failed to parse OLMo JSON", error=str(e), raw=text[:200])
+        logfire.warning("Failed to parse suggest JSON", error=str(e), raw=text[:200])
         return []
 
 
-async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
-    """Ask OLMo what's memorable from this turn."""
+async def _call_model(user_content: str, assistant_content: str) -> list[str]:
+    """Ask the chat model what's memorable from this turn."""
     system_prompt = load_prompt("suggest-system")
     turn_template = load_prompt("suggest-turn")
 
@@ -56,42 +55,44 @@ async def _call_olmo(user_content: str, assistant_content: str) -> list[str]:
     )
 
     with logfire.span(
-        "suggest.olmo",
+        "suggest.model",
         **{
             "gen_ai.operation.name": "chat",
-            "gen_ai.provider.name": "ollama",
-            "gen_ai.request.model": OLLAMA_MODEL,
+            "gen_ai.system": "openai",
+            "gen_ai.request.model": CHAT_MODEL,
         }
     ) as span:
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{OLLAMA_URL}/api/chat",
-                    json={
-                        "model": OLLAMA_MODEL,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "stream": False,
-                        "options": {"num_ctx": 8192},
-                    },
-                )
-                response.raise_for_status()
+            # Gemma 3 non-thinking sampling (per Unsloth model card).
+            response = await get_client().chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=1.0,
+                top_p=0.95,
+                extra_body={
+                    "top_k": 64,
+                    "min_p": 0.0,
+                    "repetition_penalty": 1.0,
+                },
+                timeout=30.0,
+            )
 
-            result = response.json()
-            output = result.get("message", {}).get("content", "")
+            output = response.choices[0].message.content or ""
 
-            span.set_attribute("gen_ai.usage.input_tokens", result.get("prompt_eval_count", 0))
-            span.set_attribute("gen_ai.usage.output_tokens", result.get("eval_count", 0))
-            span.set_attribute("gen_ai.response.model", OLLAMA_MODEL)
+            if response.usage:
+                span.set_attribute("gen_ai.usage.input_tokens", response.usage.prompt_tokens)
+                span.set_attribute("gen_ai.usage.output_tokens", response.usage.completion_tokens)
+            span.set_attribute("gen_ai.response.model", CHAT_MODEL)
 
             memorables = _parse_memorables(output)
-            logfire.info("OLMo memorables extracted", count=len(memorables))
+            logfire.info("Suggest memorables extracted", count=len(memorables))
             return memorables
 
         except Exception as e:
-            logfire.error("OLMo suggest failed", error=str(e))
+            logfire.error("Suggest failed", error=str(e))
             return []
 
 
@@ -111,7 +112,7 @@ async def suggest(user_content: str, assistant_content: str, session_id: str) ->
         List of memorable strings (empty if nothing notable)
     """
     with logfire.span("suggest", session_id=session_id[:8] if session_id else "none"):
-        memorables = await _call_olmo(user_content, assistant_content)
+        memorables = await _call_model(user_content, assistant_content)
 
         if memorables:
             logfire.info("Memorables extracted", session_id=session_id[:8], count=len(memorables))
